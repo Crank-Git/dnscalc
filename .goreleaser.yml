@@ -1,0 +1,36 @@
+# Goreleaser config for dnscalc.
+#
+# Builds the dnscalc binary for the common desktop/server platforms and, when
+# a v* tag is pushed, publishes a GitHub Release with the archives attached.
+#
+#   goreleaser check      validate this config against the repo
+#   goreleaser build      build every artifact into .dist/ (no GitHub interaction)
+#   goreleaser release    create the GitHub Release + upload the artifacts
+
+version: 2
+
+builds:
+  - # Static binary: CGO off so the result is portable with no runtime deps.
+    env:
+      - CGO_ENABLED=0
+    binary: dnscalc
+    main: .
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags: -s -w
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    # tar.gz everywhere: extracted natively on modern macOS/Linux and on
+    # Windows 10+ (and by 7-Zip). Keeps a single, predictable artifact shape.
+    formats:
+      - tar.gz
+
+changelog:
+  use: github
+
+release:
+  github:
+    owner: Crank-Git
+    name: dnscalc
+  mode: replace
