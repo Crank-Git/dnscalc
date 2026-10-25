@@ -43,6 +43,11 @@ const prec = 1024
 // is reported as an error rather than producing an undeliverable packet.
 const maxResultDigits = 60000
 
+// tetThreshold is the base-independent too-large bound for tetration (M4a):
+// before each iterated power step, an already-exceeding running result is
+// rejected with errResultTooLarge instead of computing the next power.
+const tetThreshold = 200000
+
 var (
 	errTokenLimit     = errors.New("too many tokens (max 64)")
 	errParenDepth     = errors.New("parenthesis depth exceeds 32")
@@ -53,6 +58,7 @@ var (
 	errInfNaN         = errors.New("result is not a finite number")
 	errUnknownWord    = errors.New("unknown word")
 	errResultTooLarge = errors.New("result too large")
+	errTetHeight      = errors.New("tetration height must be a non-negative integer")
 )
 
 // Limits from decision 4.

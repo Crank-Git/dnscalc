@@ -6,12 +6,15 @@ package main
 //
 //	expr   := term   (('+' | '-') term)*
 //	term   := power  (('*' | '/') power)*
-//	power  := unary  ('^' power)?          // right-associative
-//	unary  := ('+' | '-') power | primary // unary binds looser than '^'
+//	power  := tet    ('^' power)?          // right-associative
+//	tet    := unary  ('tet' tet)?          // right-associative, binds tighter than '^'
+//	unary  := ('+' | '-') power | primary // unary binds looser than tet
 //	primary := number | '(' expr ')'
 //
-// Power binds tighter than unary minus, and is right-associative, so
-// "-2^2" parses as -(2^2) = -4 and "2^3^2" parses as 2^(3^2) = 512.
+// Tetration (M4a) binds tighter than '^', which binds tighter than unary
+// minus, so "-2 tet 2" parses as -(2 tet 2) = -4. Tetration is
+// right-associative, so "2 tet 2 tet 2" parses as 2 tet (2 tet 2) =
+// 2 tet 4 = 65536.
 //
 // Powers are computed by powBig: an integer exponent uses binary
 // exponentiation (exact for powers of small integers, e.g. 2^80000000); a
@@ -27,6 +30,10 @@ type parser struct {
 	pos   int
 	depth int
 }
+
+// tetOp is the internal rune for tetration (M4a), produced by resolving the
+// "tet" word alias. It is not a binary operator, so binaryOp ignores it.
+const tetOp rune = 'ᛏ'
 
 // resolve converts word-alias tokens into their canonical operator/paren
 // tokens. Unknown words are an error.
@@ -48,6 +55,8 @@ func resolve(toks []token) ([]token, error) {
 			out = append(out, token{kind: tokOp, op: '/'})
 		case "pow":
 			out = append(out, token{kind: tokOp, op: '^'})
+		case "tet":
+			out = append(out, token{kind: tokOp, op: tetOp})
 		case "lp":
 			out = append(out, token{kind: tokLParen})
 		case "rp":
@@ -148,7 +157,7 @@ func (p *parser) parseTerm() (*big.Float, error) {
 }
 
 func (p *parser) parsePower() (*big.Float, error) {
-	base, err := p.parseUnary()
+	base, err := p.parseTet()
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +170,27 @@ func (p *parser) parsePower() (*big.Float, error) {
 			return nil, err
 		}
 		return powBig(base, exp), nil
+	}
+	return base, nil
+}
+
+// parseTet implements tetration (M4a): a tet b is iterated exponentiation,
+// right-associative. It parses a unary base, and if the next token is tet,
+// parses the height with a recursive parseTet (which gives right-associativity)
+// and evaluates the tower via tetration.
+func (p *parser) parseTet() (*big.Float, error) {
+	base, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+	t := p.cur()
+	if t.kind == tokOp && t.op == tetOp {
+		p.advance()
+		height, err := p.parseTet() // right-associative
+		if err != nil {
+			return nil, err
+		}
+		return tetration(base, height)
 	}
 	return base, nil
 }
@@ -250,4 +280,26 @@ func powIntExp(base *big.Float, exp *big.Int) *big.Float {
 		b.Mul(b, b)
 	}
 	return result
+}
+
+// tetration computes a tet b (M4a) by iterated power: result starts at 1 and
+// is replaced b times by a ^ result, using powBig. The height b must be a
+// non-negative integer. Before each power step the running result is checked
+// against the base-independent too-large bound (200000): if it already exceeds
+// the bound, errResultTooLarge is returned immediately without computing the
+// power, so an exploding tower never runs to completion.
+func tetration(a, b *big.Float) (*big.Float, error) {
+	if !b.IsInt() || b.Sign() < 0 {
+		return nil, errTetHeight
+	}
+	bi, _ := b.Int(nil)
+	result := newBig().SetInt64(1)
+	one := new(big.Int).SetInt64(1)
+	for i := new(big.Int); i.Cmp(bi) < 0; i.Add(i, one) {
+		if result.Cmp(newBig().SetInt64(tetThreshold)) > 0 {
+			return nil, errResultTooLarge
+		}
+		result = powBig(a, result)
+	}
+	return result, nil
 }
