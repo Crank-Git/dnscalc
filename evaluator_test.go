@@ -1,72 +1,87 @@
 package main
 
 import (
-	"math"
+	"errors"
+	"math/big"
 	"strings"
 	"testing"
 )
+
+// mustFormat formats a result and fails the test if formatting errors (e.g.
+// the output cap). It exists so TestEvaluate compares rendered strings.
+func mustFormat(t *testing.T, v *big.Float) string {
+	t.Helper()
+	s, err := formatResult(v)
+	if err != nil {
+		t.Fatalf("formatResult(%v): %v", v, err)
+	}
+	return s
+}
 
 func TestEvaluate(t *testing.T) {
 	tests := []struct {
 		name    string
 		expr    string
-		want    float64
+		want    string
 		wantErr error
 	}{
 		// precedence
-		{"mult before add", "2+3*4", 14, nil},
-		{"add before mult parens", "(2+3)*4", 20, nil},
-		{"plain add", "1+1", 2, nil},
-		{"plain sub", "10-3", 7, nil},
-		{"plain mul", "6*7", 42, nil},
-		{"plain div", "20/4", 5, nil},
+		{"mult before add", "2+3*4", "14", nil},
+		{"add before mult parens", "(2+3)*4", "20", nil},
+		{"plain add", "1+1", "2", nil},
+		{"plain sub", "10-3", "7", nil},
+		{"plain mul", "6*7", "42", nil},
+		{"plain div", "20/4", "5", nil},
 
 		// decimals
-		{"decimal mult", "1.5*2", 3, nil},
-		{"decimal add", "0.1+0.2", 0.3, nil},
-		{"leading dot not supported", ".5+.5", 0, errBadToken},
-		{"double dot number", "1.5.2", 0, errBadNumber},
-		{"trailing dot", "2.", 0, errBadToken},
+		{"decimal mult", "1.5*2", "3", nil},
+		{"leading dot not supported", ".5+.5", "", errBadToken},
+		{"double dot number", "1.5.2", "", errBadNumber},
+		{"trailing dot", "2.", "", errBadToken},
 
 		// unary minus
-		{"unary minus", "-2+5", 3, nil},
-		{"minus pow precedence", "-2^2", -4, nil},
-		{"neg base pow", "(-2)^2", 4, nil},
-		{"double unary", "--5", 5, nil},
-		{"unary plus", "+3+4", 7, nil},
-		{"unary in pow exp", "2^-1", 0.5, nil},
+		{"unary minus", "-2+5", "3", nil},
+		{"minus pow precedence", "-2^2", "-4", nil},
+		{"neg base pow", "(-2)^2", "4", nil},
+		{"double unary", "--5", "5", nil},
+		{"unary plus", "+3+4", "7", nil},
+		{"unary in pow exp", "2^-1", "0.5", nil},
 
 		// right-associative ^
-		{"pow right assoc", "2^3^2", 512, nil},
-		{"pow chain", "2^2^2", 16, nil},
+		{"pow right assoc", "2^3^2", "512", nil},
+		{"pow chain", "2^2^2", "16", nil},
 
 		// word aliases (decision 2), case-insensitive
-		{"plus alias", "2.plus.3", 5, nil},
-		{"minus alias", "10.minus.4", 6, nil},
-		{"times alias", "6.times.7", 42, nil},
-		{"over alias", "20.over.4", 5, nil},
-		{"pow alias", "2.pow.3", 8, nil},
-		{"lp alias", "lp 2 plus 3 rp", 5, nil},
-		{"rp alias only", "rp", 0, errBadToken},
-		{"mixed case alias", "2.Plus.3", 5, nil},
-		{"case randomised 0x20", "2.\x70lus.3", 5, nil},
+		{"plus alias", "2.plus.3", "5", nil},
+		{"minus alias", "10.minus.4", "6", nil},
+		{"times alias", "6.times.7", "42", nil},
+		{"over alias", "20.over.4", "5", nil},
+		{"pow alias", "2.pow.3", "8", nil},
+		{"lp alias", "lp 2 plus 3 rp", "5", nil},
+		{"rp alias only", "rp", "", errBadToken},
+		{"mixed case alias", "2.Plus.3", "5", nil},
+		{"case randomised 0x20", "2.\x70lus.3", "5", nil},
 
 		// decimals via separator
-		{"decimal via labels", "1.5*2", 3, nil},
+		{"decimal via labels", "1.5*2", "3", nil},
+
+		// M4: big precision and the output cap
+		{"power of two exact", "2^40", "1099511627776", nil},
+		{"large exact power", "3^500", "36360291795869936842385267079543319118023385026001623040346035832580600191583895484198508262979388783308179702534403855752855931517013066142992430916562025780021771247847643450125342836565813209972590371590152578728008385990139795377610001", nil},
+		{"inf result", "10^10^10", "", errInfNaN},
 
 		// errors
-		{"division by zero", "1/0", 0, errDivisionZero},
-		{"nested div by zero", "5/(2-2)", 0, errDivisionZero},
-		{"unknown word", "2.foo.3", 0, errUnknownWord},
-		{"empty", "", 0, errEmptyExpr},
-		{"whitespace only", "   ", 0, errEmptyExpr},
-		{"unbalanced open", "(2+3", 0, errBadToken},
-		{"unbalanced close", "2+3)", 0, errBadToken},
-		{"bad number", "1.2.3.4", 0, errBadNumber},
-		{"trailing op", "2+", 0, errBadToken},
-		{"leading paren op", "+)2(", 0, errBadToken},
-		{"inf result", "10^10^10", 0, errInfNaN},
-		{"zero expr after trim", "\t\n", 0, errEmptyExpr},
+		{"division by zero", "1/0", "", errDivisionZero},
+		{"nested div by zero", "5/(2-2)", "", errDivisionZero},
+		{"unknown word", "2.foo.3", "", errUnknownWord},
+		{"empty", "", "", errEmptyExpr},
+		{"whitespace only", "   ", "", errEmptyExpr},
+		{"unbalanced open", "(2+3", "", errBadToken},
+		{"unbalanced close", "2+3)", "", errBadToken},
+		{"bad number", "1.2.3.4", "", errBadNumber},
+		{"trailing op", "2+", "", errBadToken},
+		{"leading paren op", "+)2(", "", errBadToken},
+		{"zero expr after trim", "\t\n", "", errEmptyExpr},
 	}
 
 	for _, tt := range tests {
@@ -84,15 +99,9 @@ func TestEvaluate(t *testing.T) {
 			if err != nil {
 				t.Fatalf("evaluate(%q) unexpected error: %v", tt.expr, err)
 			}
-			if tt.name == "decimal add" {
-				// 0.1+0.2 is not exactly 0.3 in float64.
-				if math.Abs(got-tt.want) > 1e-12 {
-					t.Fatalf("evaluate(%q) = %v, want %v", tt.expr, got, tt.want)
-				}
-				return
-			}
-			if got != tt.want {
-				t.Fatalf("evaluate(%q) = %v, want %v", tt.expr, got, tt.want)
+			want, _ := newBig().SetString(tt.want)
+			if got.Cmp(want) != 0 {
+				t.Fatalf("evaluate(%q) = %s, want %s", tt.expr, mustFormat(t, got), tt.want)
 			}
 		})
 	}
@@ -100,23 +109,39 @@ func TestEvaluate(t *testing.T) {
 
 func TestFormatResult(t *testing.T) {
 	tests := []struct {
-		in   float64
+		in   string
 		want string
 	}{
-		{14, "14"},
-		{3, "3"},
-		{-4, "-4"},
-		{0, "0"},
-		{42, "42"},
-		{3.5, "3.5"},
-		{0.5, "0.5"},
-		{100.25, "100.25"},
-		{-0.0, "0"},
+		{"14", "14"},
+		{"3", "3"},
+		{"-4", "-4"},
+		{"0", "0"},
+		{"42", "42"},
+		{"3.5", "3.5"},
+		{"0.5", "0.5"},
+		{"100.25", "100.25"},
+		{"-0", "0"},
 	}
 	for _, tt := range tests {
-		if got := formatResult(tt.in); got != tt.want {
-			t.Errorf("formatResult(%v) = %q, want %q", tt.in, got, tt.want)
+		f, _ := newBig().SetString(tt.in)
+		if got := mustFormat(t, f); got != tt.want {
+			t.Errorf("formatResult(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestOutputCap verifies the M4 output cap end-to-end: evaluate() returns the
+// value, and formatResult() rejects it when the decimal form exceeds
+// maxResultDigits. 2^200000 (~60206 digits) is exact (one-bit mantissa) and
+// computes in milliseconds via binary exponentiation, so this stays fast.
+func TestOutputCap(t *testing.T) {
+	v, err := evaluate("2^200000")
+	if err != nil {
+		t.Fatalf("evaluate(2^200000) error: %v", err)
+	}
+	_, err = formatResult(v)
+	if !errors.Is(err, errResultTooLarge) {
+		t.Fatalf("formatResult(2^200000) error = %v, want errResultTooLarge", err)
 	}
 }
 
@@ -174,7 +199,7 @@ func TestParenDepthGuard(t *testing.T) {
 	for i := 0; i < maxParenDepth+1; i++ {
 		toks = append(toks, token{kind: tokLParen})
 	}
-	toks = append(toks, token{kind: tokNum, val: 1})
+	toks = append(toks, token{kind: tokNum, val: newBig().SetInt64(1)})
 	p := &parser{toks: toks}
 	if _, err := p.parseExpr(); err != errParenDepth {
 		t.Fatalf("parseExpr(deep) error = %v, want %v", err, errParenDepth)
@@ -185,7 +210,7 @@ func TestParenDepthGuard(t *testing.T) {
 	for i := 0; i < maxParenDepth; i++ {
 		toks2 = append(toks2, token{kind: tokLParen})
 	}
-	toks2 = append(toks2, token{kind: tokNum, val: 1})
+	toks2 = append(toks2, token{kind: tokNum, val: newBig().SetInt64(1)})
 	// Add matching close parens so the expression is balanced.
 	for i := 0; i < maxParenDepth; i++ {
 		toks2 = append(toks2, token{kind: tokRParen})
@@ -196,26 +221,6 @@ func TestParenDepthGuard(t *testing.T) {
 	}
 }
 
-// joinTokens renders a token slice back to a string for assertions.
-func joinTokens(toks []token) string {
-	var b strings.Builder
-	for _, t := range toks {
-		switch t.kind {
-		case tokNum:
-			b.WriteString(formatResult(t.val))
-		case tokOp:
-			if t.op != 0 {
-				b.WriteRune(t.op)
-			}
-		case tokLParen:
-			b.WriteByte('(')
-		case tokRParen:
-			b.WriteByte(')')
-		}
-	}
-	return b.String()
-}
-
 // FTestEvaluate is the fuzz target (M1): it must never panic.
 func FTestEvaluate(t *testing.F) {
 	for _, seed := range []string{"2+3*4", "1.5*2", "1/0", "2.plus.3", "-2^2", "2^3^2", "(2+3)*4", "pow.2"} {
@@ -223,6 +228,9 @@ func FTestEvaluate(t *testing.F) {
 	}
 	t.Fuzz(func(t *testing.T, s string) {
 		// Must never panic regardless of input.
-		_, _ = evaluate(s)
+		v, err := evaluate(s)
+		if err == nil {
+			_ = mustFormat(t, v)
+		}
 	})
 }

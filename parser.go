@@ -1,6 +1,6 @@
 package main
 
-// Recursive-descent parser over float64 (decision 3).
+// Recursive-descent parser over *big.Float (M4).
 //
 // Grammar (precedence, lowest to highest):
 //
@@ -12,8 +12,15 @@ package main
 //
 // Power binds tighter than unary minus, and is right-associative, so
 // "-2^2" parses as -(2^2) = -4 and "2^3^2" parses as 2^(3^2) = 512.
+//
+// Powers are computed by powBig: an integer exponent uses binary
+// exponentiation (exact for powers of small integers, e.g. 2^80000000); a
+// non-integer exponent falls back to float64 math.Pow widened to *big.Float.
 
-import "math"
+import (
+	"math"
+	"math/big"
+)
 
 type parser struct {
 	toks  []token
@@ -76,10 +83,10 @@ func (p *parser) binaryOp(t token) (rune, bool) {
 	return 0, false
 }
 
-func (p *parser) parseExpr() (float64, error) {
+func (p *parser) parseExpr() (*big.Float, error) {
 	v, err := p.parseTerm()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	for {
 		t := p.cur()
@@ -90,31 +97,31 @@ func (p *parser) parseExpr() (float64, error) {
 		p.advance()
 		rhs, err := p.parseTerm()
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		switch op {
 		case '+':
-			v += rhs
+			v.Add(v, rhs)
 		case '-':
-			v -= rhs
+			v.Sub(v, rhs)
 		case '*':
-			v *= rhs
+			v.Mul(v, rhs)
 		case '/':
-			if rhs == 0 {
-				return 0, errDivisionZero
+			if rhs.Sign() == 0 {
+				return nil, errDivisionZero
 			}
-			v /= rhs
+			v.Quo(v, rhs)
 		case '^':
-			v = math.Pow(v, rhs)
+			v.Set(powBig(v, rhs))
 		}
 	}
 	return v, nil
 }
 
-func (p *parser) parseTerm() (float64, error) {
+func (p *parser) parseTerm() (*big.Float, error) {
 	v, err := p.parsePower()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	for {
 		t := p.cur()
@@ -125,25 +132,25 @@ func (p *parser) parseTerm() (float64, error) {
 		p.advance()
 		rhs, err := p.parsePower()
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		switch op {
 		case '*':
-			v *= rhs
+			v.Mul(v, rhs)
 		case '/':
-			if rhs == 0 {
-				return 0, errDivisionZero
+			if rhs.Sign() == 0 {
+				return nil, errDivisionZero
 			}
-			v /= rhs
+			v.Quo(v, rhs)
 		}
 	}
 	return v, nil
 }
 
-func (p *parser) parsePower() (float64, error) {
+func (p *parser) parsePower() (*big.Float, error) {
 	base, err := p.parseUnary()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	t := p.cur()
 	op, ok := p.binaryOp(t)
@@ -151,14 +158,14 @@ func (p *parser) parsePower() (float64, error) {
 		p.advance()
 		exp, err := p.parsePower() // right-associative
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
-		return math.Pow(base, exp), nil
+		return powBig(base, exp), nil
 	}
 	return base, nil
 }
 
-func (p *parser) parseUnary() (float64, error) {
+func (p *parser) parseUnary() (*big.Float, error) {
 	t := p.cur()
 	op, ok := p.binaryOp(t)
 	if ok && (op == '+' || op == '-') {
@@ -167,20 +174,20 @@ func (p *parser) parseUnary() (float64, error) {
 		// binds looser than '^': -2^2 = -(2^2) = -4.
 		v, err := p.parsePower()
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if op == '-' {
-			return -v, nil
+			return newBig().Neg(v), nil
 		}
 		return v, nil
 	}
 	return p.parsePrimary()
 }
 
-func (p *parser) parsePrimary() (float64, error) {
+func (p *parser) parsePrimary() (*big.Float, error) {
 	t := p.cur()
 	if t.kind == tokRParen {
-		return 0, errBadToken
+		return nil, errBadToken
 	}
 	switch t.kind {
 	case tokNum:
@@ -190,21 +197,57 @@ func (p *parser) parsePrimary() (float64, error) {
 		p.advance()
 		p.depth++
 		if p.depth > maxParenDepth {
-			return 0, errParenDepth
+			return nil, errParenDepth
 		}
 		v, err := p.parseExpr()
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		// p.cur() returns an EOF sentinel of kind tokRParen, so guard the
 		// index explicitly to catch an unbalanced '('.
 		if p.pos >= len(p.toks) || p.cur().kind != tokRParen {
-			return 0, errBadToken
+			return nil, errBadToken
 		}
 		p.advance()
 		p.depth--
 		return v, nil
 	default:
-		return 0, errBadToken
+		return nil, errBadToken
 	}
+}
+
+// powBig computes base^exp at fixed precision. An integer exponent uses
+// binary exponentiation (exact for powers of small integers, e.g. 2^80000000
+// is one significant bit); a non-integer exponent falls back to float64
+// math.Pow widened to *big.Float.
+func powBig(base, exp *big.Float) *big.Float {
+	if exp.IsInt() {
+		ei, _ := exp.Int(nil)
+		if ei.Sign() >= 0 {
+			return powIntExp(base, ei)
+		}
+		// Negative integer exponent: 1 / base^|exp|.
+		inv := powIntExp(base, new(big.Int).Neg(ei))
+		one := newBig().SetInt64(1)
+		return one.Quo(one, inv)
+	}
+	// Non-integer exponent: float64 precision, widened to *big.Float.
+	b, _ := base.Float64()
+	e, _ := exp.Float64()
+	return newBig().SetFloat64(math.Pow(b, e))
+}
+
+// powIntExp computes base^exp for a non-negative integer exp via binary
+// exponentiation. Powers of small integers stay exact because each squaring
+// of a one-bit mantissa remains a one-bit mantissa.
+func powIntExp(base *big.Float, exp *big.Int) *big.Float {
+	result := newBig().SetInt64(1)
+	b := newBig().Set(base)
+	for i := 0; i < exp.BitLen(); i++ {
+		if exp.Bit(i) == 1 {
+			result.Mul(result, b)
+		}
+		b.Mul(b, b)
+	}
+	return result
 }

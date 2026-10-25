@@ -68,8 +68,15 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			Txt: []string{msg},
 		}}
 		line(msg)
+	} else if msg, err := formatResult(result); err != nil {
+		// Output cap (M4): the value is finite but too large to emit.
+		msg := "error: " + err.Error()
+		m.Answer = []dns.RR{&dns.TXT{
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlError},
+			Txt: []string{msg},
+		}}
+		line(msg)
 	} else {
-		msg := formatResult(result)
 		m.Answer = []dns.RR{&dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlValid},
 			Txt: []string{msg},
