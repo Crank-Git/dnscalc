@@ -1,0 +1,9 @@
+# Binaries
+/dnscalc
+/*.exe
+*.bin
+
+# Test / fuzz artifacts
+*.test
+coverage.out
+testdata/fuzz/*
