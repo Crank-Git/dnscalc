@@ -7,3 +7,7 @@
 *.test
 coverage.out
 testdata/fuzz/*
+
+# goreleaser build output
+/dist/
+/.dist/
