@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      # Formatting: fail if any file is not gofmt-clean.
+      - name: gofmt
+        run: |
+          UNFMTED=$(gofmt -l .)
+          if [ -n "$UNFMTED" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$UNFMTED"
+            exit 1
+          fi
+
+      # Static checks.
+      - name: go vet
+        run: go vet ./...
+
+      # Tests with the race detector.
+      - name: go test -race
+        run: go test -race ./...
+
+      # Fuzz run: must never panic.
+      - name: fuzz
+        run: go test -run='^$' -fuzz='FTestEvaluate' -fuzztime=30s
