@@ -48,18 +48,21 @@ digits it is a decimal point. This rule is documented and tested in
 
 ## Operators
 
-Hand-written recursive-descent parser over `float64` (no eval, no shelling
-out, no expression library):
+Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
+(no eval, no shelling out, no expression library):
 
 ```
-+  -  *  /  ^  ( )
++  -  *  /  ^  tet  ( )
 ```
 
 - Unary minus is supported.
 - `^` is right-associative and binds **tighter** than unary minus, so
   `-2^2 == -4` (i.e. `-(2^2)`) and `2^3^2 == 512` (i.e. `2^(3^2)`).
-- Precedence, low to high: `+ -`, then `* /`, then `^`, then unary `-`, then
-  parentheses/atoms.
+- `tet` (tetration, `a tet b` = a↑↑b) binds **tighter** than `^`, so
+  `2 tet 3 ^ 2 == 256` (i.e. `(2 tet 3)^2`) and `2 ^ 3 tet 2 == 134217728`
+  (i.e. `2^(3 tet 2)`).
+- Precedence, low to high: `+ -`, then `* /`, then unary `-`, then `^`, then
+  `tet`, then parentheses/atoms.
 
 ## Word aliases
 
@@ -73,6 +76,7 @@ Case-insensitive, hostname-safe aliases (resolvers may randomise case with
 | `times` | `*`      |
 | `over`  | `/`      |
 | `pow`   | `^`      |
+| `tet`   | `tet`    |
 | `lp`    | `(`      |
 | `rp`    | `)`      |
 
@@ -87,6 +91,22 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 - At most **64 tokens** per expression.
 - Parenthesis depth at most **32**.
 - An `inf`/`NaN` result is reported as an error.
+
+- **Output cap.** The result string is capped at **60000 characters**
+  (`maxResultDigits`); a longer one returns `error: result too large` rather
+  than overflowing the packet. This keeps the whole DNS message under the
+  65535-byte limit: a 60000-character answer comes back as a ~60063-byte
+  message (~63 bytes of header/question/answer overhead for a typical query,
+  which grows with the query name). 65535 is a hard structural ceiling, not a
+  policy choice — it is the 16-bit length field on both the UDP datagram and
+  the TCP frame.
+- **Precision ceiling.** The core is a single `*big.Float` at 1024-bit
+  precision, so results are exact only while the true value needs ≤ 1024
+  significant bits (~309 decimal digits for a general integer). Larger
+  integers are rounded to 1024-bit precision and still printed in full — the
+  leading ~309 digits are right and the rest are not. Powers of two stay
+  exact at any magnitude (their mantissa is a single bit), so `2^199313`
+  (60000 digits) is exact but `2^199316` is rejected only by the output cap.
 
 ## Output formatting
 
@@ -113,8 +133,12 @@ $ go test -race ./...      # with the race detector
 ```
 
 The evaluator has table-driven tests (precedence, unary minus, right-
-associative `^`, decimals, aliases, every error path) and a fuzz target
-(`FTestEvaluate`) that must never panic.
+associative `^`, tetration, decimals, aliases, every error path) and a fuzz
+target (`FTestEvaluate`) that must never panic.
+
+`limits_test.go` pins the two ceilings that bound how large a number we can
+output: the 60000-character output cap (`TestOutputCapBoundary`) and the
+1024-bit precision limit (`TestPrecisionBitLimit`).
 
 ## Project layout
 
@@ -123,6 +147,7 @@ evaluator.go   tokenizer + result formatting (decisions 2 & 5)
 parser.go      recursive-descent parser (decision 3)
 main.go        DNS server (decision 6 + flags)
 evaluator_test.go   M1 tests + fuzz target
+limits_test.go      M4c output-cap and precision-ceiling tests
 main_test.go        M2 in-process integration tests
 ```
 

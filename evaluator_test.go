@@ -66,7 +66,7 @@ func TestEvaluate(t *testing.T) {
 		{"tet too large exp", "10 tet 3", "", errResultTooLarge},
 		{"tet non-integer height", "2 tet 2.5", "", errTetHeight},
 		{"tet negative height", "2 tet (0-1)", "", errTetHeight},
-		{"tet binds looser than ^ exp", "2 tet 3 ^ 2", "256", nil},
+		{"tet binds tighter than ^ exp", "2 tet 3 ^ 2", "256", nil},
 		{"^ binds looser than tet", "2 ^ 3 tet 2", "134217728", nil},
 		{"tet right assoc", "2 tet 2 tet 2", "65536", nil},
 		{"tet neg base", "-2 tet 2", "-4", nil},
