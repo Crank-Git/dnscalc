@@ -126,4 +126,5 @@ evaluator_test.go   M1 tests + fuzz target
 main_test.go        M2 in-process integration tests
 ```
 
-Milestones ship as separate PRs: M1 evaluator, M2 server, M3 README + CI.
+Milestones ship as separate PRs: M1 evaluator, M2 server, M3 README +
+CI, M4a tetration operator, M4c big.Float precision and output cap.
