@@ -2,8 +2,8 @@ package main
 
 import (
 	"errors"
-	"math"
-	"strconv"
+	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -27,18 +27,32 @@ import (
 // Resolvers may randomise case with 0x20 (per RFC 4343), so we lowercase
 // the whole expression before tokenising.
 //
-// Tokens: number (float64), operator (+ - * / ^), paren ( ) and word
+// Tokens: number (*big.Float), operator (+ - * / ^), paren ( ) and word
 // alias. Unknown words are an error.
 
+// Value type (M4): a single *big.Float at fixed 1024-bit precision. All
+// arithmetic and powers use it; there is no float64 path in the core.
+const prec = 1024
+
+// maxResultDigits is the output cap (M4): a decimal result longer than this
+// is rejected instead of being emitted. The bound is set by the DNS message
+// size itself: every DNS packet is length-prefixed to 16 bits, so the whole
+// message (header + question + answer) must stay under 65535 bytes regardless
+// of record type. We cap the result string at 60000 characters, leaving
+// headroom for that overhead; anything larger (e.g. 2^80000000, ~24M digits)
+// is reported as an error rather than producing an undeliverable packet.
+const maxResultDigits = 60000
+
 var (
-	errTokenLimit   = errors.New("too many tokens (max 64)")
-	errParenDepth   = errors.New("parenthesis depth exceeds 32")
-	errDivisionZero = errors.New("division by zero")
-	errBadNumber    = errors.New("bad number")
-	errBadToken     = errors.New("unexpected token")
-	errEmptyExpr    = errors.New("empty expression")
-	errInfNaN       = errors.New("result is not a finite number")
-	errUnknownWord  = errors.New("unknown word")
+	errTokenLimit     = errors.New("too many tokens (max 64)")
+	errParenDepth     = errors.New("parenthesis depth exceeds 32")
+	errDivisionZero   = errors.New("division by zero")
+	errBadNumber      = errors.New("bad number")
+	errBadToken       = errors.New("unexpected token")
+	errEmptyExpr      = errors.New("empty expression")
+	errInfNaN         = errors.New("result is not a finite number")
+	errUnknownWord    = errors.New("unknown word")
+	errResultTooLarge = errors.New("result too large")
 )
 
 // Limits from decision 4.
@@ -47,36 +61,38 @@ const (
 	maxParenDepth = 32
 )
 
-// evaluate parses and evaluates a math expression over float64.
+func newBig() *big.Float { return new(big.Float).SetPrec(prec) }
+
+// evaluate parses and evaluates a math expression over *big.Float.
 // It supports + - * / ^ ( ), unary minus, and the word aliases
 // plus minus times over pow lp rp (case-insensitive).
-func evaluate(expr string) (float64, error) {
+func evaluate(expr string) (*big.Float, error) {
 	if strings.TrimSpace(expr) == "" {
-		return 0, errEmptyExpr
+		return nil, errEmptyExpr
 	}
 
 	toks, err := tokenize(expr)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	toks, err = resolve(toks)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if len(toks) > maxTokens {
-		return 0, errTokenLimit
+		return nil, errTokenLimit
 	}
 
 	p := &parser{toks: toks}
 	v, err := p.parseExpr()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if p.pos != len(p.toks) {
-		return 0, errBadToken
+		return nil, errBadToken
 	}
-	if !isFinite(v) {
-		return 0, errInfNaN
+	if v.IsInf() {
+		return nil, errInfNaN
 	}
 	return v, nil
 }
@@ -92,9 +108,9 @@ const (
 
 type token struct {
 	kind tokenKind
-	val  float64 // for tokNum
-	op   rune    // for tokOp
-	word string  // for word aliases (resolved by parser)
+	val  *big.Float // for tokNum
+	op   rune       // for tokOp
+	word string     // for word aliases (resolved by parser)
 }
 
 func tokenize(expr string) ([]token, error) {
@@ -187,10 +203,10 @@ func isWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
 }
 
-// readNumber reads a numeric literal starting at i. It accepts an optional
-// leading sign, digits, and a single fractional part. Returns the parsed
-// value and the number of bytes consumed.
-func readNumber(s string, i int) (float64, int, error) {
+// readNumber reads a numeric literal starting at i and returns it as a
+// *big.Float. The literal is parsed directly from source (not via float64)
+// so decimal values keep full 1024-bit precision.
+func readNumber(s string, i int) (*big.Float, int, error) {
 	n := len(s)
 	j := i
 	if j < n && (s[j] == '+' || s[j] == '-') {
@@ -201,7 +217,7 @@ func readNumber(s string, i int) (float64, int, error) {
 		j++
 	}
 	if j == start {
-		return 0, 0, errBadNumber
+		return nil, 0, errBadNumber
 	}
 	// Fractional part: a '.' followed by at least one digit.
 	if j+1 < n && s[j] == '.' && isDigit(s[j+1]) {
@@ -211,11 +227,11 @@ func readNumber(s string, i int) (float64, int, error) {
 			j++
 		}
 	}
-	v, err := strconv.ParseFloat(s[i:j], 64)
-	if err != nil {
-		return 0, 0, errBadNumber
+	f, ok := newBig().SetString(s[i:j])
+	if !ok {
+		return nil, 0, errBadNumber
 	}
-	return v, j - i, nil
+	return f, j - i, nil
 }
 
 // readWord reads a word alias starting at i and returns it and the bytes
@@ -230,15 +246,21 @@ func readWord(s string, i int) (string, int) {
 }
 
 // formatResult renders a result per decision 5: integral values print
-// without a decimal point ("14", "-4"); everything else uses the shortest
-// round-tripping representation (strconv 'g', precision -1).
-func formatResult(f float64) string {
-	if f == math.Trunc(f) && math.Abs(f) < 1e15 {
-		return strconv.FormatInt(int64(f), 10)
+// without a decimal point ("14", "-4") via (*big.Float).Int(); everything
+// else uses the shortest round-tripping representation (big.Float 'g', -1).
+//
+// It also enforces the M4 output cap: a decimal result longer than
+// maxResultDigits characters returns errResultTooLarge instead of the number.
+func formatResult(f *big.Float) (string, error) {
+	var s string
+	if f.IsInt() {
+		i, _ := f.Int(new(big.Int))
+		s = i.String()
+	} else {
+		s = f.Text('g', -1)
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
-}
-
-func isFinite(f float64) bool {
-	return f == f && !math.IsInf(f, 0) && !math.IsNaN(f)
+	if len(s) > maxResultDigits {
+		return "", fmt.Errorf("%w (%d digits)", errResultTooLarge, len(s))
+	}
+	return s, nil
 }
