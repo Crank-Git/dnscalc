@@ -36,4 +36,4 @@ jobs:
 
       # Fuzz run: must never panic.
       - name: fuzz
-        run: go test -run='^$' -fuzz='FTestEvaluate' -fuzztime=30s
+        run: go test -run='^$' -fuzz='FuzzEvaluate' -fuzztime=30s
