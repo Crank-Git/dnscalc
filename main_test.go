@@ -13,7 +13,12 @@ import (
 // and returns the port plus a cleanup func.
 func startServer(t *testing.T, zone, network string) (port int, cleanup func()) {
 	t.Helper()
-	h := &handler{zone: zone}
+	return startServerWith(t, newHandler(zone), network)
+}
+
+// startServerWith is startServer for an arbitrary handler.
+func startServerWith(t *testing.T, h dns.Handler, network string) (port int, cleanup func()) {
+	t.Helper()
 	var srv *dns.Server
 	switch network {
 	case "udp":
@@ -147,4 +152,89 @@ func TestDNSServerTCP(t *testing.T) {
 	if got := txt(t, r.Answer[0]); got != "14" {
 		t.Errorf("TXT = %q, want %q", got, "14")
 	}
+}
+
+// TestDNSServerUndefinedResults sends every expression that used to panic
+// the process (NaN / infinity in math/big) and checks each one is answered
+// with an error TXT, then that the server still answers a normal query.
+func TestDNSServerUndefinedResults(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServer(t, "calc.test.", network)
+			defer cleanup()
+
+			tests := []struct {
+				qname   string
+				wantTxt string
+			}{
+				{"lp.0-2.rp^0.5.calc.test", "error: result is not a real number"},
+				{"lp.0-8.rp^lp.1/3.rp.calc.test", "error: result is not a real number"},
+				{"lp.0-2.rp.tet.3.calc.test", "error: result is not a real number"},
+				{"0*2^2^31.calc.test", "error: result is not a finite number"},
+				{"2^2^31-2^2^31.calc.test", "error: result is not a finite number"},
+				{"0^lp.0-1.rp.calc.test", "error: division by zero"},
+			}
+			for _, tt := range tests {
+				r := queryNet(t, network, port, tt.qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess {
+					t.Errorf("%s: rcode = %s, want NOERROR", tt.qname, dns.RcodeToString[r.Rcode])
+					continue
+				}
+				if len(r.Answer) != 1 {
+					t.Errorf("%s: got %d answers, want 1", tt.qname, len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != tt.wantTxt {
+					t.Errorf("%s: TXT = %q, want %q", tt.qname, got, tt.wantTxt)
+				}
+				if ttl := r.Answer[0].Header().Ttl; ttl != ttlError {
+					t.Errorf("%s: TTL = %d, want %d", tt.qname, ttl, ttlError)
+				}
+			}
+
+			// The server must still be up and answering.
+			r := queryNet(t, network, port, "2+3*4.calc.test", dns.TypeTXT)
+			if len(r.Answer) != 1 || txt(t, r.Answer[0]) != "14" {
+				t.Fatalf("server stopped answering after undefined results: %v", r)
+			}
+		})
+	}
+}
+
+// panicHandler panics on every query.
+type panicHandler struct{}
+
+func (panicHandler) ServeDNS(dns.ResponseWriter, *dns.Msg) { panic("boom") }
+
+// TestRecoverHandler checks that a panicking handler is answered with
+// SERVFAIL and that the server keeps serving afterwards.
+func TestRecoverHandler(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServerWith(t, recoverHandler{next: panicHandler{}}, network)
+			defer cleanup()
+			for i := 0; i < 3; i++ {
+				r := queryNet(t, network, port, "2+3.calc.test", dns.TypeTXT)
+				if r.Rcode != dns.RcodeServerFailure {
+					t.Fatalf("query %d: rcode = %s, want SERVFAIL", i, dns.RcodeToString[r.Rcode])
+				}
+				if r.Id == 0 || len(r.Question) != 1 || r.Question[0].Name != "2+3.calc.test." {
+					t.Fatalf("query %d: reply does not echo the question: %v", i, r)
+				}
+			}
+		})
+	}
+}
+
+// queryNet sends one query over network ("udp" or "tcp") and returns the reply.
+func queryNet(t *testing.T, network string, port int, name string, qtype uint16) *dns.Msg {
+	t.Helper()
+	c := &dns.Client{Net: network, Timeout: 3 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), qtype)
+	r, _, err := c.Exchange(m, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("%s query %s: %v", network, name, err)
+	}
+	return r
 }

@@ -121,7 +121,12 @@ func (p *parser) parseExpr() (*big.Float, error) {
 			}
 			v.Quo(v, rhs)
 		case '^':
-			v.Set(powBig(v, rhs))
+			if v, err = powBig(v, rhs); err != nil {
+				return nil, err
+			}
+		}
+		if err := checkFinite(v); err != nil {
+			return nil, err
 		}
 	}
 	return v, nil
@@ -152,6 +157,9 @@ func (p *parser) parseTerm() (*big.Float, error) {
 			}
 			v.Quo(v, rhs)
 		}
+		if err := checkFinite(v); err != nil {
+			return nil, err
+		}
 	}
 	return v, nil
 }
@@ -169,7 +177,7 @@ func (p *parser) parsePower() (*big.Float, error) {
 		if err != nil {
 			return nil, err
 		}
-		return powBig(base, exp), nil
+		return powBig(base, exp)
 	}
 	return base, nil
 }
@@ -246,25 +254,48 @@ func (p *parser) parsePrimary() (*big.Float, error) {
 	}
 }
 
+// checkFinite rejects an overflowed (±Inf) value as soon as an operation
+// produces it. big.Float panics on undefined operations such as 0*Inf or
+// Inf-Inf, so an infinite intermediate must never reach the next operation.
+func checkFinite(v *big.Float) error {
+	if v.IsInf() {
+		return errInfNaN
+	}
+	return nil
+}
+
 // powBig computes base^exp at fixed precision. An integer exponent uses
 // binary exponentiation (exact for powers of small integers, e.g. 2^80000000
 // is one significant bit); a non-integer exponent falls back to float64
 // math.Pow widened to *big.Float.
-func powBig(base, exp *big.Float) *big.Float {
+//
+// Undefined cases are errors rather than NaN: a zero base with a negative
+// exponent is a division by zero, and a negative base with a non-integer
+// exponent has no real result.
+func powBig(base, exp *big.Float) (*big.Float, error) {
+	if base.Sign() == 0 && exp.Sign() < 0 {
+		return nil, errDivisionZero
+	}
 	if exp.IsInt() {
 		ei, _ := exp.Int(nil)
 		if ei.Sign() >= 0 {
-			return powIntExp(base, ei)
+			r := powIntExp(base, ei)
+			return r, checkFinite(r)
 		}
 		// Negative integer exponent: 1 / base^|exp|.
 		inv := powIntExp(base, new(big.Int).Neg(ei))
 		one := newBig().SetInt64(1)
-		return one.Quo(one, inv)
+		r := one.Quo(one, inv)
+		return r, checkFinite(r)
+	}
+	if base.Sign() < 0 {
+		return nil, errNotReal
 	}
 	// Non-integer exponent: float64 precision, widened to *big.Float.
 	b, _ := base.Float64()
 	e, _ := exp.Float64()
-	return newBig().SetFloat64(math.Pow(b, e))
+	v := newBig().SetFloat64(math.Pow(b, e))
+	return v, checkFinite(v)
 }
 
 // powIntExp computes base^exp for a non-negative integer exp via binary
@@ -299,7 +330,11 @@ func tetration(a, b *big.Float) (*big.Float, error) {
 		if result.Cmp(newBig().SetInt64(tetThreshold)) > 0 {
 			return nil, errResultTooLarge
 		}
-		result = powBig(a, result)
+		next, err := powBig(a, result)
+		if err != nil {
+			return nil, err
+		}
+		result = next
 	}
 	return result, nil
 }
