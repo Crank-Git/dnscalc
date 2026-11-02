@@ -86,6 +86,29 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	w.WriteMsg(m)
 }
 
+// recoverHandler answers SERVFAIL instead of letting a panic in next take
+// the process down: miekg/dns does not recover panics in handlers.
+type recoverHandler struct {
+	next dns.Handler
+}
+
+func (h recoverHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic serving %v: %v", req.Question, r)
+			m := new(dns.Msg)
+			m.SetRcode(req, dns.RcodeServerFailure)
+			w.WriteMsg(m)
+		}
+	}()
+	h.next.ServeDNS(w, req)
+}
+
+// newHandler returns the server's full handler chain for zone.
+func newHandler(zone string) dns.Handler {
+	return recoverHandler{next: &handler{zone: zone}}
+}
+
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8053", "address to serve on (host:port)")
 	zone := flag.String("zone", "calc.test.", "zone suffix that expressions hang under")
@@ -96,7 +119,7 @@ func main() {
 		*zone += "."
 	}
 
-	h := &handler{zone: *zone}
+	h := newHandler(*zone)
 
 	udp := &dns.Server{Addr: *listen, Net: "udp", Handler: h}
 	tcp := &dns.Server{Addr: *listen, Net: "tcp", Handler: h}

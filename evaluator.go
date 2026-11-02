@@ -59,6 +59,7 @@ var (
 	errUnknownWord    = errors.New("unknown word")
 	errResultTooLarge = errors.New("result too large")
 	errTetHeight      = errors.New("tetration height must be a non-negative integer")
+	errNotReal        = errors.New("result is not a real number")
 )
 
 // Limits from decision 4.

@@ -91,6 +91,24 @@ func TestEvaluate(t *testing.T) {
 		{"large exact power", "3^500", "36360291795869936842385267079543319118023385026001623040346035832580600191583895484198508262979388783308179702534403855752855931517013066142992430916562025780021771247847643450125342836565813209972590371590152578728008385990139795377610001", nil},
 		{"inf result", "10^10^10", "", errInfNaN},
 
+		// undefined results must be errors, never panics
+		{"neg base half exp", "(0-2)^0.5", "", errNotReal},
+		{"neg base third exp", "(0-8)^(1/3)", "", errNotReal},
+		{"neg literal base frac exp", "(-2)^1.5", "", errNotReal},
+		{"neg base tower", "(0-2) tet 3", "", errNotReal},
+		{"zero times overflow", "0*2^2^31", "", errInfNaN},
+		{"overflow minus overflow", "2^2^31-2^2^31", "", errInfNaN},
+		{"overflow over overflow", "2^2^31/2^2^31", "", errInfNaN},
+		{"overflow in parens", "(2^2^31)*0", "", errInfNaN},
+		{"overflow as exponent", "1^(2^2^31)", "", errInfNaN},
+		{"zero to negative power", "0^(0-1)", "", errDivisionZero},
+		{"zero to negative frac power", "0^(0-0.5)", "", errDivisionZero},
+		{"zero to zero", "0^0", "1", nil},
+		{"zero to positive", "0^3", "0", nil},
+		{"neg base neg int exp", "(0-2)^(0-2)", "0.25", nil},
+		{"neg base odd exp", "(0-2)^3", "-8", nil},
+		{"neg base even exp", "(0-2)^4", "16", nil},
+
 		// errors
 		{"division by zero", "1/0", "", errDivisionZero},
 		{"nested div by zero", "5/(2-2)", "", errDivisionZero},

@@ -90,7 +90,11 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 - Name length is bounded by DNS itself (255 bytes).
 - At most **64 tokens** per expression.
 - Parenthesis depth at most **32**.
-- An `inf`/`NaN` result is reported as an error.
+- An `inf`/`NaN` result is reported as an error. Overflow is caught as soon
+  as an operation produces it, so `0*2^2^31` is an error rather than `0`.
+- A negative base with a non-integer exponent (`(0-2)^0.5`) has no real
+  result and returns `error: result is not a real number`; `0^-1` is a
+  division by zero.
 
 - **Output cap.** The result string is capped at **60000 characters**
   (`maxResultDigits`); a longer one returns `error: result too large` rather
@@ -122,6 +126,7 @@ everything else uses the shortest round-tripping representation
 | TXT, invalid expression under the zone  | NOERROR   | TXT `error: <reason>`, TTL 60            |
 | other qtype under the zone              | NOERROR   | empty answer (NODATA)                    |
 | name outside the zone                   | REFUSED   | —                                        |
+| internal error (handler panic)          | SERVFAIL  | —                                        |
 
 Responses set the AA flag.
 
