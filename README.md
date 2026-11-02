@@ -90,8 +90,14 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 - Name length is bounded by DNS itself (255 bytes).
 - At most **64 tokens** per expression.
 - Parenthesis depth at most **32**.
-- An `inf`/`NaN` result is reported as an error. Overflow is caught as soon
-  as an operation produces it, so `0*2^2^31` is an error rather than `0`.
+- **Magnitude range.** Every value, intermediate or final, must lie within
+  2^±1048576 (about 315,000 digits either side of the point); outside that
+  the answer is `error: result too large` / `error: result too small`. The
+  check runs as soon as an operation produces a value, and powers are
+  estimated before they are computed, so `2^2^2^30` or `0*2^2^31` is
+  rejected in microseconds instead of being worked out. Intermediates may
+  exceed the output cap: `2^1000000/2^999990` is `1024`. Bases `0` and `±1`
+  are answered directly for any exponent (`1^(10^300)` is `1`).
 - A negative base with a non-integer exponent (`(0-2)^0.5`) has no real
   result and returns `error: result is not a real number`; `0^-1` is a
   division by zero.
@@ -116,7 +122,10 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 
 Integral results print with no decimal point (`14`, not `14.000000`);
 everything else uses the shortest round-tripping representation
-(`strconv` `%g`, precision `-1`).
+(`strconv` `%g`, precision `-1`). Numbers smaller than 2^-1100 print in
+scientific notation via a scaled conversion (`2^-200000` →
+`1.0019988054061873...e-60206`), so formatting cost does not grow with how
+small the number is.
 
 ## Response behaviour
 

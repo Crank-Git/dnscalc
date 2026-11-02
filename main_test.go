@@ -170,8 +170,11 @@ func TestDNSServerUndefinedResults(t *testing.T) {
 				{"lp.0-2.rp^0.5.calc.test", "error: result is not a real number"},
 				{"lp.0-8.rp^lp.1/3.rp.calc.test", "error: result is not a real number"},
 				{"lp.0-2.rp.tet.3.calc.test", "error: result is not a real number"},
-				{"0*2^2^31.calc.test", "error: result is not a finite number"},
-				{"2^2^31-2^2^31.calc.test", "error: result is not a finite number"},
+				{"0*2^2^31.calc.test", "error: result too large"},
+				{"2^2^31-2^2^31.calc.test", "error: result too large"},
+				{"2^2^24.calc.test", "error: result too large"},
+				{"2^2^2^30.calc.test", "error: result too large"},
+				{"2^-2^24.calc.test", "error: result too small"},
 				{"0^lp.0-1.rp.calc.test", "error: division by zero"},
 			}
 			for _, tt := range tests {
