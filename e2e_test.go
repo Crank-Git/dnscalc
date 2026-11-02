@@ -90,7 +90,9 @@ func TestE2EBinary(t *testing.T) {
 		// Undefined results first: each used to panic and kill the process,
 		// so the cases after them also prove the binary survived.
 		{"not-real", "lp.0-2.rp^0.5.calc.test", "error: result is not a real number"},
-		{"zero-times-overflow", "0*2^2^31.calc.test", "error: result is not a finite number"},
+		{"zero-times-overflow", "0*2^2^31.calc.test", "error: result too large"},
+		{"huge-power", "2^2^2^30.calc.test", "error: result too large"},
+		{"tiny-power", "2^-2^24.calc.test", "error: result too small"},
 		{"mult-before-add", "2+3*4.calc.test", "14"},
 		{"decimal", "1.5*2.calc.test", "3"},
 		{"division-by-zero", "1/0.calc.test", "error: division by zero"},

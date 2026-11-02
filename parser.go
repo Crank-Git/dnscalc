@@ -125,7 +125,7 @@ func (p *parser) parseExpr() (*big.Float, error) {
 				return nil, err
 			}
 		}
-		if err := checkFinite(v); err != nil {
+		if err := checkRange(v); err != nil {
 			return nil, err
 		}
 	}
@@ -157,7 +157,7 @@ func (p *parser) parseTerm() (*big.Float, error) {
 			}
 			v.Quo(v, rhs)
 		}
-		if err := checkFinite(v); err != nil {
+		if err := checkRange(v); err != nil {
 			return nil, err
 		}
 	}
@@ -254,12 +254,26 @@ func (p *parser) parsePrimary() (*big.Float, error) {
 	}
 }
 
-// checkFinite rejects an overflowed (±Inf) value as soon as an operation
-// produces it. big.Float panics on undefined operations such as 0*Inf or
-// Inf-Inf, so an infinite intermediate must never reach the next operation.
-func checkFinite(v *big.Float) error {
+// checkRange rejects a value outside ±2^maxMagnitudeBits as soon as an
+// operation produces it. Keeping every intermediate in range bounds the cost
+// of the next operation and of formatting, and means no value ever overflows
+// to ±Inf (big.Float panics on undefined operations such as 0*Inf).
+//
+// A value v = m·2^e with 0.5 <= |m| < 1 is in range when
+// 2^-maxMagnitudeBits <= |v| < 2^maxMagnitudeBits, i.e.
+// -maxMagnitudeBits < e <= maxMagnitudeBits.
+func checkRange(v *big.Float) error {
 	if v.IsInf() {
 		return errInfNaN
+	}
+	if v.Sign() == 0 {
+		return nil
+	}
+	switch e := v.MantExp(nil); {
+	case e > maxMagnitudeBits:
+		return errResultTooLarge
+	case e <= -maxMagnitudeBits:
+		return errResultTooSmall
 	}
 	return nil
 }
@@ -272,30 +286,86 @@ func checkFinite(v *big.Float) error {
 // Undefined cases are errors rather than NaN: a zero base with a negative
 // exponent is a division by zero, and a negative base with a non-integer
 // exponent has no real result.
+//
+// Bases 0 and ±1 are answered directly, whatever the exponent. For any other
+// base the size of the result is estimated first, and a result far outside
+// the magnitude range is rejected without computing it.
 func powBig(base, exp *big.Float) (*big.Float, error) {
-	if base.Sign() == 0 && exp.Sign() < 0 {
-		return nil, errDivisionZero
+	if base.Sign() == 0 {
+		switch exp.Sign() {
+		case -1:
+			return nil, errDivisionZero
+		case 0:
+			return newBig().SetInt64(1), nil
+		}
+		return newBig(), nil
+	}
+	if base.Sign() < 0 && !exp.IsInt() {
+		return nil, errNotReal
+	}
+	one := newBig().SetInt64(1)
+	if newBig().Abs(base).Cmp(one) == 0 {
+		if base.Sign() < 0 && isOdd(exp) {
+			return newBig().SetInt64(-1), nil
+		}
+		return one, nil
+	}
+	if err := estimatePow(base, exp); err != nil {
+		return nil, err
 	}
 	if exp.IsInt() {
 		ei, _ := exp.Int(nil)
 		if ei.Sign() >= 0 {
 			r := powIntExp(base, ei)
-			return r, checkFinite(r)
+			return r, checkRange(r)
 		}
 		// Negative integer exponent: 1 / base^|exp|.
 		inv := powIntExp(base, new(big.Int).Neg(ei))
-		one := newBig().SetInt64(1)
 		r := one.Quo(one, inv)
-		return r, checkFinite(r)
-	}
-	if base.Sign() < 0 {
-		return nil, errNotReal
+		return r, checkRange(r)
 	}
 	// Non-integer exponent: float64 precision, widened to *big.Float.
 	b, _ := base.Float64()
 	e, _ := exp.Float64()
 	v := newBig().SetFloat64(math.Pow(b, e))
-	return v, checkFinite(v)
+	return v, checkRange(v)
+}
+
+// estimatePow rejects base^exp when log2|base^exp| = exp·log2|base| is far
+// outside ±maxMagnitudeBits. The estimate is float64 and only needs to be
+// within a factor of two: anything it lets through is checked exactly by
+// checkRange after computing. base must not be 0 or ±1.
+//
+// Because |log2|base|| >= ~2^-1024 for any 1024-bit base other than ±1, a
+// passing exponent has at most ~1050 bits, which bounds the binary
+// exponentiation loop.
+func estimatePow(base, exp *big.Float) error {
+	mant := newBig()
+	e2 := base.MantExp(mant)
+	m, _ := mant.Abs(mant).Float64()
+	lg := float64(e2) + math.Log2(m)
+	if lg == 0 {
+		// |base| is within float64 rounding of 1 but not 1: keep the sign
+		// of log2|base| so a huge exponent still estimates as huge.
+		lg = 0x1p-1030
+		if newBig().Abs(base).Cmp(newBig().SetInt64(1)) < 0 {
+			lg = -lg
+		}
+	}
+	x, _ := exp.Float64() // ±Inf for a huge exponent; lg != 0, so no NaN
+	switch est := x * lg; {
+	case est > 2*maxMagnitudeBits:
+		return errResultTooLarge
+	case est < -2*maxMagnitudeBits:
+		return errResultTooSmall
+	}
+	return nil
+}
+
+// isOdd reports whether the integer x is odd.
+func isOdd(x *big.Float) bool {
+	i, _ := x.Int(nil)
+	return i.Bit(0) == 1
 }
 
 // powIntExp computes base^exp for a non-negative integer exp via binary
