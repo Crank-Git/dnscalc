@@ -139,7 +139,7 @@ $ go test -race ./...      # with the race detector
 
 The evaluator has table-driven tests (precedence, unary minus, right-
 associative `^`, tetration, decimals, aliases, every error path) and a fuzz
-target (`FTestEvaluate`) that must never panic.
+target (`FuzzEvaluate`) that must never panic.
 
 `limits_test.go` pins the two ceilings that bound how large a number we can
 output: the 60000-character output cap (`TestOutputCapBoundary`) and the
