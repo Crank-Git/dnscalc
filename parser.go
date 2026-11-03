@@ -291,6 +291,14 @@ func checkRange(v *big.Float) error {
 // base the size of the result is estimated first, and a result far outside
 // the magnitude range is rejected without computing it.
 func powBig(base, exp *big.Float) (*big.Float, error) {
+	return powBigLn(base, exp, nil)
+}
+
+// powBigLn is powBig with a cache for ln base: if lnBase is non-nil, a
+// non-integer power uses *lnBase, computing and storing it on first use.
+// tetration raises one base to thousands of exponents and computes ln only
+// once.
+func powBigLn(base, exp *big.Float, lnBase **big.Float) (*big.Float, error) {
 	if base.Sign() == 0 {
 		switch exp.Sign() {
 		case -1:
@@ -325,7 +333,17 @@ func powBig(base, exp *big.Float) (*big.Float, error) {
 		return r, checkRange(r)
 	}
 	// Non-integer exponent (base > 0). estimatePow bounded |exp·ln base|.
-	v := newBig().Set(bigExp(newWork().Mul(exp, bigLn(base))))
+	var ln *big.Float
+	switch {
+	case lnBase == nil:
+		ln = bigLn(base)
+	case *lnBase == nil:
+		ln = bigLn(base)
+		*lnBase = ln
+	default:
+		ln = *lnBase
+	}
+	v := newBig().Set(bigExp(newWork().Mul(exp, ln)))
 	return v, checkRange(v)
 }
 
@@ -381,28 +399,51 @@ func powIntExp(base *big.Float, exp *big.Int) *big.Float {
 	return result
 }
 
-// tetration computes a tet b (M4a) by iterated power: result starts at 1 and
-// is replaced b times by a ^ result, using powBig. The height b must be a
-// non-negative integer. Before each power step the running result is checked
-// against the base-independent too-large bound (200000): if it already exceeds
-// the bound, errResultTooLarge is returned immediately without computing the
-// power, so an exploding tower never runs to completion.
+// tetration computes a tet b (M4a, DECISIONS.md): x starts at 1 and is
+// replaced b times by a^x, using powBig, so every step is subject to the
+// magnitude range and a step that would leave it fails before it is computed.
+// The height b must be a non-negative integer.
+//
+// A tower can stop early, for any height:
+//   - a step that leaves x unchanged has reached a fixed point, and every
+//     later step gives the same x (1 tet (10^300) = 1);
+//   - a step that returns x to its value two steps back has entered a
+//     2-cycle, and the answer is whichever of the two values the parity of
+//     the remaining height lands on (0 tet n alternates 1, 0, 1, ...).
+//
+// A tower that has done none of these after maxTetSteps steps is
+// errTetSteps: bases near e^(1/e) or e^-e settle (or blow up) too slowly to
+// follow.
 func tetration(a, b *big.Float) (*big.Float, error) {
 	if !b.IsInt() || b.Sign() < 0 {
 		return nil, errTetHeight
 	}
-	bi, _ := b.Int(nil)
-	result := newBig().SetInt64(1)
-	one := new(big.Int).SetInt64(1)
-	for i := new(big.Int); i.Cmp(bi) < 0; i.Add(i, one) {
-		if result.Cmp(newBig().SetInt64(tetThreshold)) > 0 {
-			return nil, errResultTooLarge
+	h, _ := b.Int(nil)
+	x := newBig().SetInt64(1) // x = a tet i
+	var prev *big.Float       // a tet (i-1)
+	var lnA *big.Float        // ln a, computed on first use
+	for i := int64(0); ; i++ {
+		if h.Cmp(big.NewInt(i)) == 0 {
+			return x, nil
 		}
-		next, err := powBig(a, result)
+		if i == maxTetSteps {
+			return nil, errTetSteps
+		}
+		next, err := powBigLn(a, x, &lnA)
 		if err != nil {
 			return nil, err
 		}
-		result = next
+		if next.Cmp(x) == 0 {
+			return x, nil
+		}
+		if prev != nil && next.Cmp(prev) == 0 {
+			// a tet (i+1) == a tet (i-1): from i-1 on the values alternate
+			// next, x, next, ... so a tet h is next when h-(i+1) is even.
+			if new(big.Int).Sub(h, big.NewInt(i+1)).Bit(0) == 0 {
+				return next, nil
+			}
+			return x, nil
+		}
+		prev, x = x, next
 	}
-	return result, nil
 }

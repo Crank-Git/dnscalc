@@ -63,7 +63,11 @@ Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
   `-2^2 == -4` (i.e. `-(2^2)`) and `2^3^2 == 512` (i.e. `2^(3^2)`).
 - `tet` (tetration, `a tet b` = a↑↑b) binds **tighter** than `^`, so
   `2 tet 3 ^ 2 == 256` (i.e. `(2 tet 3)^2`) and `2 ^ 3 tet 2 == 134217728`
-  (i.e. `2^(3 tet 2)`).
+  (i.e. `2^(3 tet 2)`). The height must be a non-negative integer. Towers
+  that settle return for any height: `1 tet (10^300)` is `1`,
+  `(2^0.5) tet (10^300)` is `2`, `0.5 tet (10^300)` is `0.641185744…`,
+  and `0 tet n` alternates `1, 0`. A tower is limited to 10000 steps; see
+  `DECISIONS.md` for the full rules.
 - Precedence, low to high: `+ -`, then `* /`, then unary `-`, then `^`, then
   `tet`, then parentheses/atoms.
 
