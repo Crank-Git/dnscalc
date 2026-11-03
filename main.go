@@ -59,7 +59,9 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 	// Expression = every label before the suffix, joined with ".". The
 	// suffix is cut by length, since its case may differ from h.zone's.
-	expr := strings.TrimSuffix(qname[:len(qname)-len(h.zone)], ".")
+	// The name is in presentation format, so "(" arrives as "\(" and a
+	// space as "\ "; unescape before evaluating.
+	expr := unescapeName(strings.TrimSuffix(qname[:len(qname)-len(h.zone)], "."))
 
 	result, err := evaluate(expr)
 	line := func(res string) {
@@ -89,6 +91,31 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		line(msg)
 	}
 	writeReply(w, req, m)
+}
+
+// unescapeName undoes the presentation-format escaping miekg/dns applies to
+// names: "\DDD" becomes the byte with decimal value DDD, and "\X" becomes X
+// for any other character X.
+func unescapeName(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\\' || i+1 == len(s) {
+			b.WriteByte(c)
+			continue
+		}
+		if i+3 < len(s) && isDigit(s[i+1]) && isDigit(s[i+2]) && isDigit(s[i+3]) {
+			b.WriteByte(byte(int(s[i+1]-'0')*100 + int(s[i+2]-'0')*10 + int(s[i+3]-'0')))
+			i += 3
+			continue
+		}
+		b.WriteByte(s[i+1])
+		i++
+	}
+	return b.String()
 }
 
 // maxTXTString is the most bytes one TXT character-string can hold: its

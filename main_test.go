@@ -413,3 +413,64 @@ func TestDNSZoneCaseInsensitive(t *testing.T) {
 		})
 	}
 }
+
+func TestUnescapeName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"", ""},
+		{"2+3*4", "2+3*4"},
+		{`\(2+3\)*4`, "(2+3)*4"},
+		{`2\ tet\ 3`, "2 tet 3"},
+		{`\0402\041`, "(2)"}, // \040 is decimal 40, '('
+		{`2\0323`, "2 3"},    // \032 is a space
+		{`\.`, "."},
+		{`\\`, `\`},
+		{`2\;3`, "2;3"},
+		{`\"x\"`, `"x"`},
+		{`\1`, "1"},     // not three digits: plain escape
+		{`\12x`, "12x"}, // likewise
+		{`\255`, "\xff"},
+		{`\000`, "\x00"},
+		{`2\`, `2\`}, // a trailing backslash stays
+	}
+	for _, tt := range tests {
+		if got := unescapeName(tt.in); got != tt.want {
+			t.Errorf("unescapeName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestDNSEscapedNames checks expressions using characters that travel
+// escaped in presentation format, parentheses and spaces above all, work
+// over DNS. The client sends the raw bytes; the server sees "\(" and "\ ".
+func TestDNSEscapedNames(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServer(t, "calc.test.", network)
+			defer cleanup()
+			tests := []struct{ qname, want string }{
+				{"(2+3)*4.calc.test", "20"},
+				{"((1+2)*(3+4)).calc.test", "21"},
+				{"-(2^2).calc.test", "-4"},
+				{"(0-2)^0.5.calc.test", "error: result is not a real number"},
+				{"2 tet 3.calc.test", "16"},
+				{"(2 + 3) * 4.calc.test", "20"},
+				{"lp.2+3.rp*(4).calc.test", "20"},
+				{"(1).5.calc.test", "error: unexpected token"},
+				{"2;3.calc.test", "error: unexpected token"},
+				{`2\\3.calc.test`, "error: unexpected token"},
+				// Already presentation-escaped by the caller: same bytes on the wire.
+				{`\(2+3\)*4.calc.test`, "20"},
+			}
+			for _, tt := range tests {
+				r := queryNet(t, network, port, tt.qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+					t.Errorf("%s: rcode %s, %d answers", tt.qname, dns.RcodeToString[r.Rcode], len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != tt.want {
+					t.Errorf("%s: TXT %q, want %q", tt.qname, got, tt.want)
+				}
+			}
+		})
+	}
+}
