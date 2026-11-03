@@ -73,8 +73,10 @@ Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
 
 ## Word aliases
 
-Case-insensitive, hostname-safe aliases (resolvers may randomise case with
-`0x20`, so matching is case-insensitive):
+Case-insensitive, hostname-safe aliases. Resolvers may randomise case with
+`0x20`, so both the aliases and the zone match in any case
+(`2.PlUs.3.CaLc.TeSt` works, and `-zone` may be given in any case); the
+answer echoes the name in the case it was asked.
 
 | alias   | operator |
 |---------|----------|

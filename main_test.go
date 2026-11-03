@@ -367,3 +367,49 @@ func TestDNSLongResults(t *testing.T) {
 		t.Fatalf("2^199316: TC=%v answers=%d, want an error TXT", r.Truncated, len(r.Answer))
 	}
 }
+
+// TestDNSZoneCaseInsensitive checks names under the zone match in any case,
+// as 0x20 resolvers send them, that the answer echoes the name in the case
+// it was asked, and that the zone flag itself may be any case.
+func TestDNSZoneCaseInsensitive(t *testing.T) {
+	for _, zone := range []string{"calc.test.", "Calc.Test", "CALC.TEST."} {
+		t.Run(zone, func(t *testing.T) {
+			port, cleanup := startServerWith(t, newHandler(zone), "udp")
+			defer cleanup()
+			for _, qname := range []string{
+				"2+3.calc.test.", "2+3.CALC.TEST.", "2+3.Calc.Test.", "2+3.cAlC.tEsT.",
+				"2.PlUs.3.CaLc.TeSt.", "LP.2.plus.3.RP.calc.TEST.",
+			} {
+				r := queryNet(t, "udp", port, qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+					t.Errorf("%s: rcode %s, %d answers; want NOERROR with one answer", qname, dns.RcodeToString[r.Rcode], len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != "5" {
+					t.Errorf("%s: TXT %q, want \"5\"", qname, got)
+				}
+				if got := r.Answer[0].Header().Name; got != qname {
+					t.Errorf("%s: answer name %q, want the name as asked", qname, got)
+				}
+				if got := r.Question[0].Name; got != qname {
+					t.Errorf("%s: question echoed as %q", qname, got)
+				}
+			}
+
+			// Other qtypes in mixed case are NODATA, not REFUSED.
+			if r := queryNet(t, "udp", port, "2+3.CALC.test.", dns.TypeA); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+				t.Errorf("A 2+3.CALC.test.: rcode %s, %d answers; want NODATA", dns.RcodeToString[r.Rcode], len(r.Answer))
+			}
+			// The apex is still under the zone.
+			if r := queryNet(t, "udp", port, "CALC.test.", dns.TypeTXT); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 || txt(t, r.Answer[0]) != "error: empty expression" {
+				t.Errorf("apex: %v", r)
+			}
+			// Case-insensitivity must not loosen the label boundary.
+			for _, qname := range []string{"2+3.CALC.TESTX.", "2+3.XCALC.TEST.", "2+3CALC.TEST.", "2+3.calc.test.evil.", "test."} {
+				if r := queryNet(t, "udp", port, qname, dns.TypeTXT); r.Rcode != dns.RcodeRefused {
+					t.Errorf("%s: rcode %s, want REFUSED", qname, dns.RcodeToString[r.Rcode])
+				}
+			}
+		})
+	}
+}

@@ -18,8 +18,9 @@ const (
 
 // handler evaluates math expressions served under a configurable zone.
 type handler struct {
-	// zone is the rooted zone suffix (e.g. "calc.test."). A query name is
-	// "under the zone" when it equals the zone or ends with "."+zone.
+	// zone is the rooted, lowercase zone suffix (e.g. "calc.test."). A query
+	// name is "under the zone" when, compared case-insensitively, it equals
+	// the zone or ends with "."+zone.
 	zone string
 }
 
@@ -39,8 +40,10 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	q := req.Question[0]
 	qname := q.Name
 
-	// Name outside the zone -> REFUSED.
-	if qname != h.zone && !strings.HasSuffix(qname, "."+h.zone) {
+	// Name outside the zone -> REFUSED. Names compare case-insensitively:
+	// resolvers using 0x20 randomise the case of every query.
+	lname := strings.ToLower(qname)
+	if lname != h.zone && !strings.HasSuffix(lname, "."+h.zone) {
 		m.Rcode = dns.RcodeRefused
 		log.Printf("qname=%s qtype=%s rcode=%s result=-\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode])
 		writeReply(w, req, m)
@@ -54,8 +57,9 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// Expression = every label before the suffix, joined with ".".
-	expr := strings.TrimSuffix(strings.TrimSuffix(qname, h.zone), ".")
+	// Expression = every label before the suffix, joined with ".". The
+	// suffix is cut by length, since its case may differ from h.zone's.
+	expr := strings.TrimSuffix(qname[:len(qname)-len(h.zone)], ".")
 
 	result, err := evaluate(expr)
 	line := func(res string) {
@@ -143,20 +147,16 @@ func (h recoverHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	h.next.ServeDNS(w, req)
 }
 
-// newHandler returns the server's full handler chain for zone.
+// newHandler returns the server's full handler chain for zone, which may be
+// given in any case, with or without the trailing dot.
 func newHandler(zone string) dns.Handler {
-	return recoverHandler{next: &handler{zone: zone}}
+	return recoverHandler{next: &handler{zone: strings.ToLower(dns.Fqdn(zone))}}
 }
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8053", "address to serve on (host:port)")
 	zone := flag.String("zone", "calc.test.", "zone suffix that expressions hang under")
 	flag.Parse()
-
-	// Normalise: a rooted zone keeps the suffix math in main simple.
-	if !strings.HasSuffix(*zone, ".") {
-		*zone += "."
-	}
 
 	h := newHandler(*zone)
 
