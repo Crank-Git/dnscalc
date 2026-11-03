@@ -26,7 +26,7 @@ import (
 //	"2.plus.3" -> ["2", "plus", "3"]  (dot between digit and letter -> sep)
 //
 // Word aliases are case-insensitive and resolved after lowercasing.
-// Resolvers may randomise case with 0x20 (per RFC 4343), so we lowercase
+// Resolvers may randomize case with 0x20 (per RFC 4343), so we lowercase
 // the whole expression before tokenising.
 //
 // Tokens: number (*big.Float), operator (+ - * / ^), paren ( ) and word

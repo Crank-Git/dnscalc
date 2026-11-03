@@ -82,7 +82,7 @@ func TestEvaluate(t *testing.T) {
 		{"lp alias", "lp 2 plus 3 rp", "5", nil},
 		{"rp alias only", "rp", "", errBadToken},
 		{"mixed case alias", "2.Plus.3", "5", nil},
-		{"case randomised 0x20", "2.PlUs.3", "5", nil},
+		{"case randomized 0x20", "2.PlUs.3", "5", nil},
 		{"all upper alias", "2.PLUS.3", "5", nil},
 		{"0x20 minus", "10.MiNuS.4", "6", nil},
 		{"0x20 times over", "6.tImEs.7.OvEr.2", "21", nil},
