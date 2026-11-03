@@ -46,6 +46,19 @@ The `.` is a separator only when it sits between two *words*; between two
 digits it is a decimal point. This rule is documented and tested in
 `evaluator.go`.
 
+Parentheses and spaces work directly in names; DNS tools escape them on the
+way (`\(`, `\ `) and the server unescapes before evaluating:
+
+```
+$ dig @127.0.0.1 -p 8053 +short TXT '(2+3)*4.calc.test'
+"20"
+$ dig @127.0.0.1 -p 8053 +short TXT '2 tet 3.calc.test'
+"16"
+```
+
+A single label is at most 63 bytes, so split long expressions with `.` at a
+word boundary (`2^100.plus.3^50`).
+
 ## Operators
 
 Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision

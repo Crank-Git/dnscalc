@@ -155,6 +155,9 @@ func TestE2EDig(t *testing.T) {
 		want string
 	}{
 		{[]string{"TXT", "2+3*4.calc.test"}, "14"},
+		{[]string{"TXT", "(2+3)*4.calc.test"}, "20"},
+		{[]string{"TXT", "2 tet 3.calc.test"}, "16"},
+		{[]string{"TXT", `((1+2)*\(3+4\)).calc.test`}, "21"},
 		{[]string{"TXT", "1/3.calc.test"}, "0." + strings.Repeat("3", 300)},
 		{[]string{"TXT", "2^5000.calc.test"}, pow2(5000)},                  // UDP truncated, dig retries TCP
 		{[]string{"+bufsize=4096", "TXT", "2^5000.calc.test"}, pow2(5000)}, // fits EDNS0 UDP
