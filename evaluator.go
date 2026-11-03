@@ -3,7 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -24,15 +26,21 @@ import (
 //	"2.plus.3" -> ["2", "plus", "3"]  (dot between digit and letter -> sep)
 //
 // Word aliases are case-insensitive and resolved after lowercasing.
-// Resolvers may randomise case with 0x20 (per RFC 4343), so we lowercase
+// Resolvers may randomize case with 0x20 (per RFC 4343), so we lowercase
 // the whole expression before tokenising.
 //
 // Tokens: number (*big.Float), operator (+ - * / ^), paren ( ) and word
-// alias. Unknown words are an error.
+// alias (plus minus times over pow tet lp rp). Unknown words are an error.
 
 // Value type (M4): a single *big.Float at fixed 1024-bit precision. All
 // arithmetic and powers use it; there is no float64 path in the core.
 const prec = 1024
+
+// outputDigits is how many significant digits a non-integer result prints
+// with (trailing zeros trimmed). A 1024-bit mantissa holds ~308, so the last
+// few, where rounding noise from ln/exp or from an inexact binary fraction
+// lives, are dropped: 2^0.5*2^0.5 prints 2, not 2.000...0002.
+const outputDigits = 300
 
 // maxResultDigits is the output cap (M4): a decimal result longer than this
 // is rejected instead of being emitted. The bound is set by the DNS message
@@ -43,10 +51,24 @@ const prec = 1024
 // is reported as an error rather than producing an undeliverable packet.
 const maxResultDigits = 60000
 
-// tetThreshold is the base-independent too-large bound for tetration (M4a):
-// before each iterated power step, an already-exceeding running result is
-// rejected with errResultTooLarge instead of computing the next power.
-const tetThreshold = 200000
+// maxMagnitudeBits bounds every value, intermediate or final: a value must
+// satisfy 2^-maxMagnitudeBits <= |v| < 2^maxMagnitudeBits (zero aside), about
+// 315,000 decimal digits either side of the point. Outside that it is
+// errResultTooLarge / errResultTooSmall. It is well past the output cap so
+// intermediates like 2^1000000/2^999990 still work, and small enough that
+// every operation and every format stays cheap.
+const maxMagnitudeBits = 1 << 20
+
+// tinyFormatBits is where formatResult switches to formatTiny: big.Float's
+// exact decimal conversion of a number below 2^-tinyFormatBits costs roughly
+// the square of its binary exponent (2^-200000 takes over a second).
+const tinyFormatBits = 1100
+
+// maxTetSteps caps the power steps one tetration may take (DECISIONS.md),
+// bounding a tower at roughly a quarter second of CPU. Towers settle well
+// within it (2^0.5: ~900 steps, 1.44: ~5400, 0.05: ~7300); only bases very
+// close to e^(1/e) ~ 1.4447 or e^-e ~ 0.066, such as 1.444 or 0.07, reach it.
+const maxTetSteps = 10000
 
 var (
 	errTokenLimit     = errors.New("too many tokens (max 64)")
@@ -58,7 +80,10 @@ var (
 	errInfNaN         = errors.New("result is not a finite number")
 	errUnknownWord    = errors.New("unknown word")
 	errResultTooLarge = errors.New("result too large")
+	errResultTooSmall = errors.New("result too small")
 	errTetHeight      = errors.New("tetration height must be a non-negative integer")
+	errTetSteps       = errors.New("tetration does not settle within 10000 steps")
+	errNotReal        = errors.New("result is not a real number")
 )
 
 // Limits from decision 4.
@@ -71,7 +96,7 @@ func newBig() *big.Float { return new(big.Float).SetPrec(prec) }
 
 // evaluate parses and evaluates a math expression over *big.Float.
 // It supports + - * / ^ ( ), unary minus, and the word aliases
-// plus minus times over pow lp rp (case-insensitive).
+// plus minus times over pow tet lp rp (case-insensitive).
 func evaluate(expr string) (*big.Float, error) {
 	if strings.TrimSpace(expr) == "" {
 		return nil, errEmptyExpr
@@ -96,9 +121,6 @@ func evaluate(expr string) (*big.Float, error) {
 	}
 	if p.pos != len(p.toks) {
 		return nil, errBadToken
-	}
-	if v.IsInf() {
-		return nil, errInfNaN
 	}
 	return v, nil
 }
@@ -155,13 +177,10 @@ func tokenize(expr string) ([]token, error) {
 				// Separator between two word/number tokens: drop it.
 				i++
 			case isDecimalDot(s, i):
-				// A number that begins with a dot, e.g. ".5".
-				num, adv, err := readNumber(s, i)
-				if err != nil {
-					return nil, errBadNumber
-				}
-				toks = append(toks, token{kind: tokNum, val: num})
-				i += adv
+				// A digit on both sides but the number before it has
+				// already been read, so this is a second decimal point,
+				// as in "1.5.2".
+				return nil, errBadNumber
 			default:
 				return nil, errBadToken
 			}
@@ -209,21 +228,14 @@ func isWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
 }
 
-// readNumber reads a numeric literal starting at i and returns it as a
-// *big.Float. The literal is parsed directly from source (not via float64)
+// readNumber reads a numeric literal starting at the digit at i and returns
+// it as a *big.Float. The literal is parsed directly from source (not via float64)
 // so decimal values keep full 1024-bit precision.
 func readNumber(s string, i int) (*big.Float, int, error) {
 	n := len(s)
 	j := i
-	if j < n && (s[j] == '+' || s[j] == '-') {
-		j++
-	}
-	start := j
 	for j < n && isDigit(s[j]) {
 		j++
-	}
-	if j == start {
-		return nil, 0, errBadNumber
 	}
 	// Fractional part: a '.' followed by at least one digit.
 	if j+1 < n && s[j] == '.' && isDigit(s[j+1]) {
@@ -253,20 +265,61 @@ func readWord(s string, i int) (string, int) {
 
 // formatResult renders a result per decision 5: integral values print
 // without a decimal point ("14", "-4") via (*big.Float).Int(); everything
-// else uses the shortest round-tripping representation (big.Float 'g', -1).
+// else prints outputDigits significant digits, trailing zeros trimmed
+// (big.Float 'g', outputDigits).
 //
 // It also enforces the M4 output cap: a decimal result longer than
 // maxResultDigits characters returns errResultTooLarge instead of the number.
+//
+// An integer whose digit count is already known to be over the cap is
+// rejected without converting it, and a number below 2^-tinyFormatBits is
+// formatted by formatTiny.
 func formatResult(f *big.Float) (string, error) {
+	e2 := f.MantExp(nil)
 	var s string
-	if f.IsInt() {
+	switch {
+	case f.IsInt():
+		// |f| >= 2^(e2-1), so it has at least floor((e2-1)·log10 2)+1 digits.
+		if digits := int(float64(e2-1)*math.Log10(2)) + 1; digits > maxResultDigits {
+			return "", fmt.Errorf("%w (at least %d digits)", errResultTooLarge, digits)
+		}
 		i, _ := f.Int(new(big.Int))
 		s = i.String()
-	} else {
-		s = f.Text('g', -1)
+	case e2 < -tinyFormatBits:
+		s = formatTiny(f)
+	default:
+		s = f.Text('g', outputDigits)
 	}
 	if len(s) > maxResultDigits {
 		return "", fmt.Errorf("%w (%d digits)", errResultTooLarge, len(s))
 	}
 	return s, nil
+}
+
+// formatTiny formats a small non-zero f in scientific notation without
+// big.Float's exact decimal conversion. It scales f by a power of ten into
+// roughly [1, 20), formats that (cheap: its exponent is small) and puts the
+// decimal exponent back, so the cost no longer depends on how small f is.
+// The scaling runs at 64 guard bits so the digits match the exact
+// conversion to within the last place or two of the 1024-bit mantissa.
+func formatTiny(f *big.Float) string {
+	const work = prec + 64
+	e2 := f.MantExp(nil)
+	// |f| >= 2^(e2-1), so 10^k <= |f| for k = floor((e2-1)·log10 2).
+	k := int(math.Floor(float64(e2-1) * math.Log10(2)))
+	ten := new(big.Float).SetPrec(work).SetInt64(10)
+	scale := new(big.Float).SetPrec(work).SetInt64(1)
+	for p := -k; p > 0; p >>= 1 {
+		if p&1 == 1 {
+			scale.Mul(scale, ten)
+		}
+		ten.Mul(ten, ten)
+	}
+	y := new(big.Float).SetPrec(work).Mul(f, scale)
+	y.SetPrec(prec)
+	s := y.Text('e', outputDigits-1) // e.g. "1.00199880540618737900e+00"
+	i := strings.LastIndexByte(s, 'e')
+	ye, _ := strconv.Atoi(s[i+1:])
+	mant := strings.TrimRight(strings.TrimRight(s[:i], "0"), ".")
+	return fmt.Sprintf("%se%+03d", mant, ye+k)
 }

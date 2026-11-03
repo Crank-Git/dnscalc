@@ -18,7 +18,7 @@ package main
 //
 // Powers are computed by powBig: an integer exponent uses binary
 // exponentiation (exact for powers of small integers, e.g. 2^80000000); a
-// non-integer exponent falls back to float64 math.Pow widened to *big.Float.
+// non-integer exponent is e^(exp·ln base) at full precision (bigmath.go).
 
 import (
 	"math"
@@ -100,7 +100,7 @@ func (p *parser) parseExpr() (*big.Float, error) {
 	for {
 		t := p.cur()
 		op, ok := p.binaryOp(t)
-		if !ok {
+		if !ok || (op != '+' && op != '-') {
 			break
 		}
 		p.advance()
@@ -108,20 +108,13 @@ func (p *parser) parseExpr() (*big.Float, error) {
 		if err != nil {
 			return nil, err
 		}
-		switch op {
-		case '+':
+		if op == '+' {
 			v.Add(v, rhs)
-		case '-':
+		} else {
 			v.Sub(v, rhs)
-		case '*':
-			v.Mul(v, rhs)
-		case '/':
-			if rhs.Sign() == 0 {
-				return nil, errDivisionZero
-			}
-			v.Quo(v, rhs)
-		case '^':
-			v.Set(powBig(v, rhs))
+		}
+		if err := checkRange(v); err != nil {
+			return nil, err
 		}
 	}
 	return v, nil
@@ -152,6 +145,9 @@ func (p *parser) parseTerm() (*big.Float, error) {
 			}
 			v.Quo(v, rhs)
 		}
+		if err := checkRange(v); err != nil {
+			return nil, err
+		}
 	}
 	return v, nil
 }
@@ -169,7 +165,7 @@ func (p *parser) parsePower() (*big.Float, error) {
 		if err != nil {
 			return nil, err
 		}
-		return powBig(base, exp), nil
+		return powBig(base, exp)
 	}
 	return base, nil
 }
@@ -246,25 +242,134 @@ func (p *parser) parsePrimary() (*big.Float, error) {
 	}
 }
 
+// checkRange rejects a value outside ±2^maxMagnitudeBits as soon as an
+// operation produces it. Keeping every intermediate in range bounds the cost
+// of the next operation and of formatting, and means no value ever overflows
+// to ±Inf (big.Float panics on undefined operations such as 0*Inf).
+//
+// A value v = m·2^e with 0.5 <= |m| < 1 is in range when
+// 2^-maxMagnitudeBits <= |v| < 2^maxMagnitudeBits, i.e.
+// -maxMagnitudeBits < e <= maxMagnitudeBits.
+func checkRange(v *big.Float) error {
+	if v.IsInf() {
+		return errInfNaN
+	}
+	if v.Sign() == 0 {
+		return nil
+	}
+	switch e := v.MantExp(nil); {
+	case e > maxMagnitudeBits:
+		return errResultTooLarge
+	case e <= -maxMagnitudeBits:
+		return errResultTooSmall
+	}
+	return nil
+}
+
 // powBig computes base^exp at fixed precision. An integer exponent uses
 // binary exponentiation (exact for powers of small integers, e.g. 2^80000000
-// is one significant bit); a non-integer exponent falls back to float64
-// math.Pow widened to *big.Float.
-func powBig(base, exp *big.Float) *big.Float {
+// is one significant bit); a non-integer exponent is e^(exp·ln base),
+// computed at workPrec and rounded to prec.
+//
+// Undefined cases are errors rather than NaN: a zero base with a negative
+// exponent is a division by zero, and a negative base with a non-integer
+// exponent has no real result.
+//
+// Bases 0 and ±1 are answered directly, whatever the exponent. For any other
+// base the size of the result is estimated first, and a result far outside
+// the magnitude range is rejected without computing it.
+func powBig(base, exp *big.Float) (*big.Float, error) {
+	return powBigLn(base, exp, nil)
+}
+
+// powBigLn is powBig with a cache for ln base: if lnBase is non-nil, a
+// non-integer power uses *lnBase, computing and storing it on first use.
+// tetration raises one base to thousands of exponents and computes ln only
+// once.
+func powBigLn(base, exp *big.Float, lnBase **big.Float) (*big.Float, error) {
+	if base.Sign() == 0 {
+		switch exp.Sign() {
+		case -1:
+			return nil, errDivisionZero
+		case 0:
+			return newBig().SetInt64(1), nil
+		}
+		return newBig(), nil
+	}
+	if base.Sign() < 0 && !exp.IsInt() {
+		return nil, errNotReal
+	}
+	one := newBig().SetInt64(1)
+	if newBig().Abs(base).Cmp(one) == 0 {
+		if base.Sign() < 0 && isOdd(exp) {
+			return newBig().SetInt64(-1), nil
+		}
+		return one, nil
+	}
+	if err := estimatePow(base, exp); err != nil {
+		return nil, err
+	}
 	if exp.IsInt() {
 		ei, _ := exp.Int(nil)
 		if ei.Sign() >= 0 {
-			return powIntExp(base, ei)
+			r := powIntExp(base, ei)
+			return r, checkRange(r)
 		}
 		// Negative integer exponent: 1 / base^|exp|.
 		inv := powIntExp(base, new(big.Int).Neg(ei))
-		one := newBig().SetInt64(1)
-		return one.Quo(one, inv)
+		r := one.Quo(one, inv)
+		return r, checkRange(r)
 	}
-	// Non-integer exponent: float64 precision, widened to *big.Float.
-	b, _ := base.Float64()
-	e, _ := exp.Float64()
-	return newBig().SetFloat64(math.Pow(b, e))
+	// Non-integer exponent (base > 0). estimatePow bounded |exp·ln base|.
+	var ln *big.Float
+	switch {
+	case lnBase == nil:
+		ln = bigLn(base)
+	case *lnBase == nil:
+		ln = bigLn(base)
+		*lnBase = ln
+	default:
+		ln = *lnBase
+	}
+	v := newBig().Set(bigExp(newWork().Mul(exp, ln)))
+	return v, checkRange(v)
+}
+
+// estimatePow rejects base^exp when log2|base^exp| = exp·log2|base| is far
+// outside ±maxMagnitudeBits. The estimate is float64 and only needs to be
+// within a factor of two: anything it lets through is checked exactly by
+// checkRange after computing. base must not be 0 or ±1.
+//
+// Because |log2|base|| >= ~2^-1024 for any 1024-bit base other than ±1, a
+// passing exponent has at most ~1050 bits, which bounds the binary
+// exponentiation loop.
+func estimatePow(base, exp *big.Float) error {
+	mant := newBig()
+	e2 := base.MantExp(mant)
+	m, _ := mant.Abs(mant).Float64()
+	lg := float64(e2) + math.Log2(m)
+	if lg == 0 {
+		// |base| is within float64 rounding of 1 but not 1: keep the sign
+		// of log2|base| so a huge exponent still estimates as huge.
+		lg = 0x1p-1030
+		if newBig().Abs(base).Cmp(newBig().SetInt64(1)) < 0 {
+			lg = -lg
+		}
+	}
+	x, _ := exp.Float64() // ±Inf for a huge exponent; lg != 0, so no NaN
+	switch est := x * lg; {
+	case est > 2*maxMagnitudeBits:
+		return errResultTooLarge
+	case est < -2*maxMagnitudeBits:
+		return errResultTooSmall
+	}
+	return nil
+}
+
+// isOdd reports whether the integer x is odd.
+func isOdd(x *big.Float) bool {
+	i, _ := x.Int(nil)
+	return i.Bit(0) == 1
 }
 
 // powIntExp computes base^exp for a non-negative integer exp via binary
@@ -282,24 +387,51 @@ func powIntExp(base *big.Float, exp *big.Int) *big.Float {
 	return result
 }
 
-// tetration computes a tet b (M4a) by iterated power: result starts at 1 and
-// is replaced b times by a ^ result, using powBig. The height b must be a
-// non-negative integer. Before each power step the running result is checked
-// against the base-independent too-large bound (200000): if it already exceeds
-// the bound, errResultTooLarge is returned immediately without computing the
-// power, so an exploding tower never runs to completion.
+// tetration computes a tet b (M4a, DECISIONS.md): x starts at 1 and is
+// replaced b times by a^x, using powBig, so every step is subject to the
+// magnitude range and a step that would leave it fails before it is computed.
+// The height b must be a non-negative integer.
+//
+// A tower can stop early, for any height:
+//   - a step that leaves x unchanged has reached a fixed point, and every
+//     later step gives the same x (1 tet (10^300) = 1);
+//   - a step that returns x to its value two steps back has entered a
+//     2-cycle, and the answer is whichever of the two values the parity of
+//     the remaining height lands on (0 tet n alternates 1, 0, 1, ...).
+//
+// A tower that has done none of these after maxTetSteps steps is
+// errTetSteps: bases near e^(1/e) or e^-e settle (or blow up) too slowly to
+// follow.
 func tetration(a, b *big.Float) (*big.Float, error) {
 	if !b.IsInt() || b.Sign() < 0 {
 		return nil, errTetHeight
 	}
-	bi, _ := b.Int(nil)
-	result := newBig().SetInt64(1)
-	one := new(big.Int).SetInt64(1)
-	for i := new(big.Int); i.Cmp(bi) < 0; i.Add(i, one) {
-		if result.Cmp(newBig().SetInt64(tetThreshold)) > 0 {
-			return nil, errResultTooLarge
+	h, _ := b.Int(nil)
+	x := newBig().SetInt64(1) // x = a tet i
+	var prev *big.Float       // a tet (i-1)
+	var lnA *big.Float        // ln a, computed on first use
+	for i := int64(0); ; i++ {
+		if h.Cmp(big.NewInt(i)) == 0 {
+			return x, nil
 		}
-		result = powBig(a, result)
+		if i == maxTetSteps {
+			return nil, errTetSteps
+		}
+		next, err := powBigLn(a, x, &lnA)
+		if err != nil {
+			return nil, err
+		}
+		if next.Cmp(x) == 0 {
+			return x, nil
+		}
+		if prev != nil && next.Cmp(prev) == 0 {
+			// a tet (i+1) == a tet (i-1): from i-1 on the values alternate
+			// next, x, next, ... so a tet h is next when h-(i+1) is even.
+			if new(big.Int).Sub(h, big.NewInt(i+1)).Bit(0) == 0 {
+				return next, nil
+			}
+			return x, nil
+		}
+		prev, x = x, next
 	}
-	return result, nil
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"math/big"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +15,12 @@ import (
 // and returns the port plus a cleanup func.
 func startServer(t *testing.T, zone, network string) (port int, cleanup func()) {
 	t.Helper()
-	h := &handler{zone: zone}
+	return startServerWith(t, newHandler(zone), network)
+}
+
+// startServerWith is startServer for an arbitrary handler.
+func startServerWith(t *testing.T, h dns.Handler, network string) (port int, cleanup func()) {
+	t.Helper()
 	var srv *dns.Server
 	switch network {
 	case "udp":
@@ -74,7 +81,12 @@ func txt(t *testing.T, rr dns.RR) string {
 	if len(txt.Txt) == 0 {
 		t.Fatalf("empty TXT body")
 	}
-	return txt.Txt[0]
+	for i, part := range txt.Txt {
+		if len(part) > maxTXTString {
+			t.Fatalf("TXT string %d is %d bytes, over %d", i, len(part), maxTXTString)
+		}
+	}
+	return strings.Join(txt.Txt, "")
 }
 
 func TestDNSServerResponses(t *testing.T) {
@@ -146,5 +158,391 @@ func TestDNSServerTCP(t *testing.T) {
 	}
 	if got := txt(t, r.Answer[0]); got != "14" {
 		t.Errorf("TXT = %q, want %q", got, "14")
+	}
+}
+
+// TestDNSServerUndefinedResults sends every expression that used to panic
+// the process (NaN / infinity in math/big) or run without bound (huge powers,
+// towers of height 10^300) and checks each is answered promptly with the
+// right TXT, then that the server still answers a normal query.
+func TestDNSServerUndefinedResults(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServer(t, "calc.test.", network)
+			defer cleanup()
+
+			tests := []struct {
+				qname   string
+				wantTxt string
+			}{
+				{"lp.0-2.rp^0.5.calc.test", "error: result is not a real number"},
+				{"lp.0-8.rp^lp.1/3.rp.calc.test", "error: result is not a real number"},
+				{"lp.0-2.rp.tet.3.calc.test", "error: result is not a real number"},
+				{"0*2^2^31.calc.test", "error: result too large"},
+				{"2^2^31-2^2^31.calc.test", "error: result too large"},
+				{"2^2^24.calc.test", "error: result too large"},
+				{"2^2^2^30.calc.test", "error: result too large"},
+				{"2^-2^24.calc.test", "error: result too small"},
+				{"0^lp.0-1.rp.calc.test", "error: division by zero"},
+				{"1.tet.lp.10.pow.300.rp.calc.test", "1"},
+				{"0.tet.lp.10.pow.300.rp.calc.test", "1"},
+				{"0.tet.lp.10.pow.300.plus.1.rp.calc.test", "0"},
+				{"2.tet.lp.10.pow.300.rp.calc.test", "error: result too large"},
+			}
+			for _, tt := range tests {
+				r := queryNet(t, network, port, tt.qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess {
+					t.Errorf("%s: rcode = %s, want NOERROR", tt.qname, dns.RcodeToString[r.Rcode])
+					continue
+				}
+				if len(r.Answer) != 1 {
+					t.Errorf("%s: got %d answers, want 1", tt.qname, len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != tt.wantTxt {
+					t.Errorf("%s: TXT = %q, want %q", tt.qname, got, tt.wantTxt)
+				}
+				wantTTL := uint32(ttlValid)
+				if strings.HasPrefix(tt.wantTxt, "error: ") {
+					wantTTL = ttlError
+				}
+				if ttl := r.Answer[0].Header().Ttl; ttl != wantTTL {
+					t.Errorf("%s: TTL = %d, want %d", tt.qname, ttl, wantTTL)
+				}
+			}
+
+			// The server must still be up and answering.
+			r := queryNet(t, network, port, "2+3*4.calc.test", dns.TypeTXT)
+			if len(r.Answer) != 1 || txt(t, r.Answer[0]) != "14" {
+				t.Fatalf("server stopped answering after undefined results: %v", r)
+			}
+		})
+	}
+}
+
+// panicHandler panics on every query.
+type panicHandler struct{}
+
+func (panicHandler) ServeDNS(dns.ResponseWriter, *dns.Msg) { panic("boom") }
+
+// TestRecoverHandler checks that a panicking handler is answered with
+// SERVFAIL and that the server keeps serving afterwards.
+func TestRecoverHandler(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServerWith(t, recoverHandler{next: panicHandler{}}, network)
+			defer cleanup()
+			for i := 0; i < 3; i++ {
+				r := queryNet(t, network, port, "2+3.calc.test", dns.TypeTXT)
+				if r.Rcode != dns.RcodeServerFailure {
+					t.Fatalf("query %d: rcode = %s, want SERVFAIL", i, dns.RcodeToString[r.Rcode])
+				}
+				if r.Id == 0 || len(r.Question) != 1 || r.Question[0].Name != "2+3.calc.test." {
+					t.Fatalf("query %d: reply does not echo the question: %v", i, r)
+				}
+			}
+		})
+	}
+}
+
+// queryNet sends one query over network ("udp" or "tcp") and returns the reply.
+func queryNet(t *testing.T, network string, port int, name string, qtype uint16) *dns.Msg {
+	t.Helper()
+	c := &dns.Client{Net: network, Timeout: 3 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), qtype)
+	r, _, err := c.Exchange(m, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("%s query %s: %v", network, name, err)
+	}
+	return r
+}
+
+func TestSplitTXT(t *testing.T) {
+	for _, n := range []int{1, 254, 255, 256, 509, 510, 511, 60000} {
+		s := strings.Repeat("7", n-1) + "x"
+		parts := splitTXT(s)
+		if want := (n + maxTXTString - 1) / maxTXTString; len(parts) != want {
+			t.Errorf("n=%d: %d strings, want %d", n, len(parts), want)
+		}
+		for i, p := range parts {
+			if i < len(parts)-1 && len(p) != maxTXTString {
+				t.Errorf("n=%d: string %d is %d bytes, want %d", n, i, len(p), maxTXTString)
+			}
+			if len(p) == 0 || len(p) > maxTXTString {
+				t.Errorf("n=%d: string %d is %d bytes", n, i, len(p))
+			}
+		}
+		if strings.Join(parts, "") != s {
+			t.Errorf("n=%d: parts do not rejoin to the input", n)
+		}
+	}
+}
+
+// exchange sends one TXT query for name, optionally with an EDNS0 OPT
+// advertising ednsSize, and returns the reply.
+func exchange(t *testing.T, network string, port int, name string, ednsSize uint16) *dns.Msg {
+	t.Helper()
+	c := &dns.Client{Net: network, Timeout: 3 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
+	if ednsSize != 0 {
+		m.SetEdns0(ednsSize, false)
+	}
+	r, _, err := c.Exchange(m, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("%s query %s (edns %d): %v", network, name, ednsSize, err)
+	}
+	return r
+}
+
+// TestDNSLongResults checks results longer than one TXT string are delivered
+// whole: split into <=255-byte strings, truncated with TC over UDP when they
+// exceed the client's buffer, and served in full over TCP up to the output
+// cap, including with a long query name.
+func TestDNSLongResults(t *testing.T) {
+	udpPort, cleanUDP := startServer(t, "calc.test.", "udp")
+	defer cleanUDP()
+	tcpPort, cleanTCP := startServer(t, "calc.test.", "tcp")
+	defer cleanTCP()
+
+	pow2 := func(n uint) string { return new(big.Int).Lsh(big.NewInt(1), n).String() }
+	// A ~200-byte name: 2^199313 plus thirty "plus.0" labels.
+	longName := "2^199313" + strings.Repeat(".plus.0", 30) + ".calc.test"
+
+	tests := []struct {
+		qname     string
+		want      string
+		plainFits bool // fits a 512-byte UDP reply
+		ednsFits  bool // fits a 4096-byte EDNS0 UDP reply
+	}{
+		{"2^800.calc.test", pow2(800), true, true},
+		{"2^900.calc.test", pow2(900), true, true},
+		{"1/3.calc.test", "0." + strings.Repeat("3", 300), true, true},
+		{"2^5000.calc.test", pow2(5000), false, true},
+		{"2^199313.calc.test", pow2(199313), false, false},
+		{longName, pow2(199313), false, false},
+	}
+	for _, tt := range tests {
+		name := tt.qname
+		if len(name) > 40 {
+			name = name[:40] + "..."
+		}
+		t.Run(name, func(t *testing.T) {
+			check := func(label string, r *dns.Msg, fits bool) {
+				t.Helper()
+				if r.Rcode != dns.RcodeSuccess {
+					t.Fatalf("%s: rcode %s", label, dns.RcodeToString[r.Rcode])
+				}
+				if !fits {
+					if !r.Truncated || len(r.Answer) != 0 {
+						t.Fatalf("%s: TC=%v with %d answers, want TC and no answer", label, r.Truncated, len(r.Answer))
+					}
+					return
+				}
+				if r.Truncated || len(r.Answer) != 1 {
+					t.Fatalf("%s: TC=%v with %d answers, want the full answer", label, r.Truncated, len(r.Answer))
+				}
+				if got := txt(t, r.Answer[0]); got != tt.want {
+					t.Fatalf("%s: got %d chars, want %d (%.20s...)", label, len(got), len(tt.want), tt.want)
+				}
+			}
+			plain := exchange(t, "udp", udpPort, tt.qname, 0)
+			check("udp", plain, tt.plainFits)
+			if plain.IsEdns0() != nil {
+				t.Errorf("udp: reply has OPT but the query had none")
+			}
+			edns := exchange(t, "udp", udpPort, tt.qname, 4096)
+			check("udp+edns", edns, tt.ednsFits)
+			if edns.IsEdns0() == nil {
+				t.Errorf("udp+edns: reply has no OPT record")
+			}
+			check("tcp", exchange(t, "tcp", tcpPort, tt.qname, 0), true)
+		})
+	}
+
+	// Past the cap: an error, small enough for plain UDP.
+	r := exchange(t, "udp", udpPort, "2^199316.calc.test", 0)
+	if r.Truncated || len(r.Answer) != 1 || !strings.HasPrefix(txt(t, r.Answer[0]), "error: result too large") {
+		t.Fatalf("2^199316: TC=%v answers=%d, want an error TXT", r.Truncated, len(r.Answer))
+	}
+}
+
+// TestDNSZoneCaseInsensitive checks names under the zone match in any case,
+// as 0x20 resolvers send them, that the answer echoes the name in the case
+// it was asked, and that the zone flag itself may be any case.
+func TestDNSZoneCaseInsensitive(t *testing.T) {
+	for _, zone := range []string{"calc.test.", "Calc.Test", "CALC.TEST."} {
+		t.Run(zone, func(t *testing.T) {
+			port, cleanup := startServerWith(t, newHandler(zone), "udp")
+			defer cleanup()
+			for _, qname := range []string{
+				"2+3.calc.test.", "2+3.CALC.TEST.", "2+3.Calc.Test.", "2+3.cAlC.tEsT.",
+				"2.PlUs.3.CaLc.TeSt.", "LP.2.plus.3.RP.calc.TEST.",
+			} {
+				r := queryNet(t, "udp", port, qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+					t.Errorf("%s: rcode %s, %d answers; want NOERROR with one answer", qname, dns.RcodeToString[r.Rcode], len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != "5" {
+					t.Errorf("%s: TXT %q, want \"5\"", qname, got)
+				}
+				if got := r.Answer[0].Header().Name; got != qname {
+					t.Errorf("%s: answer name %q, want the name as asked", qname, got)
+				}
+				if got := r.Question[0].Name; got != qname {
+					t.Errorf("%s: question echoed as %q", qname, got)
+				}
+			}
+
+			// Other qtypes in mixed case are NODATA, not REFUSED.
+			if r := queryNet(t, "udp", port, "2+3.CALC.test.", dns.TypeA); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+				t.Errorf("A 2+3.CALC.test.: rcode %s, %d answers; want NODATA", dns.RcodeToString[r.Rcode], len(r.Answer))
+			}
+			// The apex is still under the zone.
+			if r := queryNet(t, "udp", port, "CALC.test.", dns.TypeTXT); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 || txt(t, r.Answer[0]) != "error: empty expression" {
+				t.Errorf("apex: %v", r)
+			}
+			// Case-insensitivity must not loosen the label boundary.
+			for _, qname := range []string{"2+3.CALC.TESTX.", "2+3.XCALC.TEST.", "2+3CALC.TEST.", "2+3.calc.test.evil.", "test."} {
+				if r := queryNet(t, "udp", port, qname, dns.TypeTXT); r.Rcode != dns.RcodeRefused {
+					t.Errorf("%s: rcode %s, want REFUSED", qname, dns.RcodeToString[r.Rcode])
+				}
+			}
+		})
+	}
+}
+
+func TestUnescapeName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"", ""},
+		{"2+3*4", "2+3*4"},
+		{`\(2+3\)*4`, "(2+3)*4"},
+		{`2\ tet\ 3`, "2 tet 3"},
+		{`\0402\041`, "(2)"}, // \040 is decimal 40, '('
+		{`2\0323`, "2 3"},    // \032 is a space
+		{`\.`, "."},
+		{`\\`, `\`},
+		{`2\;3`, "2;3"},
+		{`\"x\"`, `"x"`},
+		{`\1`, "1"},     // not three digits: plain escape
+		{`\12x`, "12x"}, // likewise
+		{`\255`, "\xff"},
+		{`\000`, "\x00"},
+		{`2\`, `2\`}, // a trailing backslash stays
+	}
+	for _, tt := range tests {
+		if got := unescapeName(tt.in); got != tt.want {
+			t.Errorf("unescapeName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestDNSEscapedNames checks expressions using characters that travel
+// escaped in presentation format, parentheses and spaces above all, work
+// over DNS. The client sends the raw bytes; the server sees "\(" and "\ ".
+func TestDNSEscapedNames(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			port, cleanup := startServer(t, "calc.test.", network)
+			defer cleanup()
+			tests := []struct{ qname, want string }{
+				{"(2+3)*4.calc.test", "20"},
+				{"((1+2)*(3+4)).calc.test", "21"},
+				{"-(2^2).calc.test", "-4"},
+				{"(0-2)^0.5.calc.test", "error: result is not a real number"},
+				{"2 tet 3.calc.test", "16"},
+				{"(2 + 3) * 4.calc.test", "20"},
+				{"lp.2+3.rp*(4).calc.test", "20"},
+				{"(1).5.calc.test", "error: unexpected token"},
+				{"2;3.calc.test", "error: unexpected token"},
+				{`2\\3.calc.test`, "error: unexpected token"},
+				// Already presentation-escaped by the caller: same bytes on the wire.
+				{`\(2+3\)*4.calc.test`, "20"},
+			}
+			for _, tt := range tests {
+				r := queryNet(t, network, port, tt.qname, dns.TypeTXT)
+				if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+					t.Errorf("%s: rcode %s, %d answers", tt.qname, dns.RcodeToString[r.Rcode], len(r.Answer))
+					continue
+				}
+				if got := txt(t, r.Answer[0]); got != tt.want {
+					t.Errorf("%s: TXT %q, want %q", tt.qname, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDNSSOA checks NODATA answers carry the zone's SOA in the authority
+// section, with a minimum TTL of ttlError, and that an SOA query at the
+// apex is answered with it.
+func TestDNSSOA(t *testing.T) {
+	port, cleanup := startServer(t, "Calc.Test", "udp")
+	defer cleanup()
+	checkSOA := func(label string, rr dns.RR) {
+		t.Helper()
+		soa, ok := rr.(*dns.SOA)
+		if !ok {
+			t.Fatalf("%s: got %T, want *dns.SOA", label, rr)
+		}
+		if soa.Hdr.Name != "calc.test." || soa.Minttl != ttlError || soa.Hdr.Ttl != ttlError {
+			t.Errorf("%s: SOA name %q minttl %d ttl %d", label, soa.Hdr.Name, soa.Minttl, soa.Hdr.Ttl)
+		}
+		if soa.Ns != "ns.calc.test." || soa.Mbox != "hostmaster.calc.test." {
+			t.Errorf("%s: SOA ns %q mbox %q", label, soa.Ns, soa.Mbox)
+		}
+	}
+	for _, q := range []struct {
+		name  string
+		qtype uint16
+	}{
+		{"2+3.calc.test.", dns.TypeA},
+		{"2+3.CALC.test.", dns.TypeAAAA},
+		{"calc.test.", dns.TypeNS},
+		{"2+3.calc.test.", dns.TypeSOA}, // SOA below the apex: NODATA too
+	} {
+		r := queryNet(t, "udp", port, q.name, q.qtype)
+		label := dns.TypeToString[q.qtype] + " " + q.name
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 || len(r.Ns) != 1 {
+			t.Errorf("%s: rcode %s, %d answers, %d authority; want NODATA with one SOA", label, dns.RcodeToString[r.Rcode], len(r.Answer), len(r.Ns))
+			continue
+		}
+		checkSOA(label, r.Ns[0])
+	}
+	for _, apex := range []string{"calc.test.", "CALC.Test."} {
+		r := queryNet(t, "udp", port, apex, dns.TypeSOA)
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+			t.Errorf("SOA %s: rcode %s, %d answers", apex, dns.RcodeToString[r.Rcode], len(r.Answer))
+			continue
+		}
+		checkSOA("SOA "+apex, r.Answer[0])
+	}
+	// TXT answers and REFUSED carry no authority section.
+	if r := queryNet(t, "udp", port, "2+3.calc.test.", dns.TypeTXT); len(r.Ns) != 0 {
+		t.Errorf("TXT answer has %d authority records", len(r.Ns))
+	}
+	if r := queryNet(t, "udp", port, "2+3.example.org.", dns.TypeA); r.Rcode != dns.RcodeRefused || len(r.Ns) != 0 {
+		t.Errorf("outside zone: rcode %s, %d authority", dns.RcodeToString[r.Rcode], len(r.Ns))
+	}
+}
+
+// TestAnswer pins the TXT text and TTL for each outcome of evaluation.
+func TestAnswer(t *testing.T) {
+	tests := []struct {
+		expr string
+		msg  string
+		ttl  uint32
+	}{
+		{"2+3*4", "14", ttlValid},
+		{"1/0", "error: division by zero", ttlError},
+		{"2^199316", "error: result too large (at least 60001 digits)", ttlError},
+		{"", "error: empty expression", ttlError},
+	}
+	for _, tt := range tests {
+		if msg, ttl := answer(tt.expr); msg != tt.msg || ttl != tt.ttl {
+			t.Errorf("answer(%q) = %q, %d; want %q, %d", tt.expr, msg, ttl, tt.msg, tt.ttl)
+		}
 	}
 }

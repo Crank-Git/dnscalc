@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   build:
@@ -30,10 +30,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # dig for the e2e test; DNSCALC_REQUIRE_DIG makes it fail, not skip,
+      # if dig is missing.
+      - name: install dig
+        run: command -v dig || (sudo apt-get update && sudo apt-get install -y dnsutils)
+
       # Tests with the race detector.
       - name: go test -race
+        env:
+          DNSCALC_REQUIRE_DIG: "1"
         run: go test -race ./...
 
       # Fuzz run: must never panic.
       - name: fuzz
-        run: go test -run='^$' -fuzz='FTestEvaluate' -fuzztime=30s
+        run: go test -run='^$' -fuzz='FuzzEvaluate' -fuzztime=30s

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"math/big"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -81,7 +82,14 @@ func TestEvaluate(t *testing.T) {
 		{"lp alias", "lp 2 plus 3 rp", "5", nil},
 		{"rp alias only", "rp", "", errBadToken},
 		{"mixed case alias", "2.Plus.3", "5", nil},
-		{"case randomised 0x20", "2.\x70lus.3", "5", nil},
+		{"case randomized 0x20", "2.PlUs.3", "5", nil},
+		{"all upper alias", "2.PLUS.3", "5", nil},
+		{"0x20 minus", "10.MiNuS.4", "6", nil},
+		{"0x20 times over", "6.tImEs.7.OvEr.2", "21", nil},
+		{"0x20 pow", "2.PoW.10", "1024", nil},
+		{"0x20 parens", "LP.2.Plus.3.Rp.TIMES.4", "20", nil},
+		{"0x20 tet", "2.TeT.3", "16", nil},
+		{"0x20 unknown word", "2.FoO.3", "", errUnknownWord},
 
 		// decimals via separator
 		{"decimal via labels", "1.5*2", "3", nil},
@@ -89,7 +97,25 @@ func TestEvaluate(t *testing.T) {
 		// M4: big precision and the output cap
 		{"power of two exact", "2^40", "1099511627776", nil},
 		{"large exact power", "3^500", "36360291795869936842385267079543319118023385026001623040346035832580600191583895484198508262979388783308179702534403855752855931517013066142992430916562025780021771247847643450125342836565813209972590371590152578728008385990139795377610001", nil},
-		{"inf result", "10^10^10", "", errInfNaN},
+		{"too large result", "10^10^10", "", errResultTooLarge},
+
+		// undefined results must be errors, never panics
+		{"neg base half exp", "(0-2)^0.5", "", errNotReal},
+		{"neg base third exp", "(0-8)^(1/3)", "", errNotReal},
+		{"neg literal base frac exp", "(-2)^1.5", "", errNotReal},
+		{"neg base tower", "(0-2) tet 3", "", errNotReal},
+		{"zero times overflow", "0*2^2^31", "", errResultTooLarge},
+		{"overflow minus overflow", "2^2^31-2^2^31", "", errResultTooLarge},
+		{"overflow over overflow", "2^2^31/2^2^31", "", errResultTooLarge},
+		{"overflow in parens", "(2^2^31)*0", "", errResultTooLarge},
+		{"overflow as exponent", "1^(2^2^31)", "", errResultTooLarge},
+		{"zero to negative power", "0^(0-1)", "", errDivisionZero},
+		{"zero to negative frac power", "0^(0-0.5)", "", errDivisionZero},
+		{"zero to zero", "0^0", "1", nil},
+		{"zero to positive", "0^3", "0", nil},
+		{"neg base neg int exp", "(0-2)^(0-2)", "0.25", nil},
+		{"neg base odd exp", "(0-2)^3", "-8", nil},
+		{"neg base even exp", "(0-2)^4", "16", nil},
 
 		// errors
 		{"division by zero", "1/0", "", errDivisionZero},
@@ -242,16 +268,40 @@ func TestParenDepthGuard(t *testing.T) {
 	}
 }
 
-// FTestEvaluate is the fuzz target (M1): it must never panic.
-func FTestEvaluate(t *testing.F) {
-	for _, seed := range []string{"2+3*4", "1.5*2", "1/0", "2.plus.3", "-2^2", "2^3^2", "(2+3)*4", "pow.2"} {
-		t.Add(seed)
+// FuzzEvaluate is the fuzz target (M1): evaluate and formatResult must never
+// panic, and an error from formatResult may only be the output cap.
+func FuzzEvaluate(f *testing.F) {
+	for _, seed := range []string{
+		"2+3*4", "1.5*2", "1/0", "2.plus.3", "-2^2", "2^3^2", "(2+3)*4", "pow.2",
+		"lp.2.plus.3.rp.times.4", "2.TeT.3", "2 tet 2 tet 2", "(0-2)^0.5",
+		"0*2^2^31", "2^2^31-2^2^31", "0^(0-1)", "(0-2) tet 3", "1/3",
+		"--5", "2^-1", "1.5.2", ".5", "2.", "((((1))))", "2^200000",
+	} {
+		f.Add(seed)
 	}
-	t.Fuzz(func(t *testing.T, s string) {
-		// Must never panic regardless of input.
+	f.Fuzz(func(t *testing.T, s string) {
 		v, err := evaluate(s)
-		if err == nil {
-			_ = mustFormat(t, v)
+		if err != nil {
+			return
+		}
+		if _, err := formatResult(v); err != nil && !errors.Is(err, errResultTooLarge) {
+			t.Fatalf("formatResult(evaluate(%q)): %v", s, err)
 		}
 	})
+}
+
+// TestFuzzTargetDiscovered fails if go test stops seeing the fuzz target
+// (a target not named FuzzXxx is silently ignored, so CI would "fuzz"
+// nothing and still pass).
+func TestFuzzTargetDiscovered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs go test -list")
+	}
+	out, err := exec.Command("go", "test", "-list", "^Fuzz", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go test -list: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "FuzzEvaluate\n") {
+		t.Fatalf("FuzzEvaluate not discovered by go test -list:\n%s", out)
+	}
 }

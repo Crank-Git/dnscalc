@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"math/big"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +67,9 @@ func TestE2EBinary(t *testing.T) {
 	}
 
 	port := freePort(t)
-	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "-zone", "calc.test.")
+	// Zone flag in mixed case without the trailing dot: queries below use
+	// another case and must still match.
+	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "-zone", "Calc.Test")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -87,11 +92,20 @@ func TestE2EBinary(t *testing.T) {
 		qname   string
 		wantTxt string
 	}{
+		// Undefined results first: each used to panic and kill the process,
+		// so the cases after them also prove the binary survived.
+		{"not-real", "lp.0-2.rp^0.5.calc.test", "error: result is not a real number"},
+		{"zero-times-overflow", "0*2^2^31.calc.test", "error: result too large"},
+		{"huge-power", "2^2^2^30.calc.test", "error: result too large"},
+		{"tiny-power", "2^-2^24.calc.test", "error: result too small"},
 		{"mult-before-add", "2+3*4.calc.test", "14"},
+		{"zone-0x20", "2+3*4.cAlC.TeSt", "14"},
 		{"decimal", "1.5*2.calc.test", "3"},
 		{"division-by-zero", "1/0.calc.test", "error: division by zero"},
 		{"pow-alias", "2.pow.3.calc.test", "8"},
 		{"tetration", "2.tet.3.calc.test", "16"},
+		{"tetration-settles", "1.tet.lp.10.pow.300.rp.calc.test", "1"},
+		{"tetration-two-cycle", "0.tet.lp.10.pow.300.plus.1.rp.calc.test", "0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -109,5 +123,62 @@ func TestE2EBinary(t *testing.T) {
 				t.Errorf("query %s: TXT = %q, want %q", tt.qname, got, tt.wantTxt)
 			}
 		})
+	}
+}
+
+// TestE2EDig checks long results with the real dig against the built binary:
+// dig retries a truncated UDP reply over TCP on its own, and prints the TXT
+// strings separately, which must rejoin to the full number.
+func TestE2EDig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e in -short mode")
+	}
+	dig, err := exec.LookPath("dig")
+	if err != nil {
+		// CI sets DNSCALC_REQUIRE_DIG so this can't silently skip there.
+		if os.Getenv("DNSCALC_REQUIRE_DIG") != "" {
+			t.Fatal("dig not installed and DNSCALC_REQUIRE_DIG is set")
+		}
+		t.Skip("dig not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dnscalc")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build binary: %v\n%s", err, out)
+	}
+	port := freePort(t)
+	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start binary: %v", err)
+	}
+	defer cmd.Process.Kill()
+	waitReady(t, port, 5*time.Second)
+
+	pow2 := func(n uint) string { return new(big.Int).Lsh(big.NewInt(1), n).String() }
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"TXT", "2+3*4.calc.test"}, "14"},
+		{[]string{"TXT", "(2+3)*4.calc.test"}, "20"},
+		{[]string{"TXT", "2 tet 3.calc.test"}, "16"},
+		{[]string{"TXT", `((1+2)*\(3+4\)).calc.test`}, "21"},
+		{[]string{"TXT", "1/3.calc.test"}, "0." + strings.Repeat("3", 300)},
+		{[]string{"TXT", "2^5000.calc.test"}, pow2(5000)},                  // UDP truncated, dig retries TCP
+		{[]string{"+bufsize=4096", "TXT", "2^5000.calc.test"}, pow2(5000)}, // fits EDNS0 UDP
+		{[]string{"+tcp", "TXT", "2^199313.calc.test"}, pow2(199313)},
+		{[]string{"TXT", "2^199313.calc.test"}, pow2(199313)},
+	}
+	for _, tt := range tests {
+		args := append([]string{"@127.0.0.1", "-p", strconv.Itoa(port), "+short", "+tries=1", "+time=3"}, tt.args...)
+		out, err := exec.Command(dig, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("dig %v: %v\n%s", tt.args, err, out)
+		}
+		// dig prints each TXT string quoted, separated by spaces.
+		got := strings.NewReplacer("\"", "", " ", "", "\n", "").Replace(string(out))
+		if got != tt.want {
+			t.Errorf("dig %v: got %d chars (%.40q), want %d", tt.args, len(got), got, len(tt.want))
+		}
 	}
 }
