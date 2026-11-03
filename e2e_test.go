@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math/big"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -134,6 +135,10 @@ func TestE2EDig(t *testing.T) {
 	}
 	dig, err := exec.LookPath("dig")
 	if err != nil {
+		// CI sets DNSCALC_REQUIRE_DIG so this can't silently skip there.
+		if os.Getenv("DNSCALC_REQUIRE_DIG") != "" {
+			t.Fatal("dig not installed and DNSCALC_REQUIRE_DIG is set")
+		}
 		t.Skip("dig not installed")
 	}
 	dir := t.TempDir()

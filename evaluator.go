@@ -30,7 +30,7 @@ import (
 // the whole expression before tokenising.
 //
 // Tokens: number (*big.Float), operator (+ - * / ^), paren ( ) and word
-// alias. Unknown words are an error.
+// alias (plus minus times over pow tet lp rp). Unknown words are an error.
 
 // Value type (M4): a single *big.Float at fixed 1024-bit precision. All
 // arithmetic and powers use it; there is no float64 path in the core.
@@ -96,7 +96,7 @@ func newBig() *big.Float { return new(big.Float).SetPrec(prec) }
 
 // evaluate parses and evaluates a math expression over *big.Float.
 // It supports + - * / ^ ( ), unary minus, and the word aliases
-// plus minus times over pow lp rp (case-insensitive).
+// plus minus times over pow tet lp rp (case-insensitive).
 func evaluate(expr string) (*big.Float, error) {
 	if strings.TrimSpace(expr) == "" {
 		return nil, errEmptyExpr
@@ -121,9 +121,6 @@ func evaluate(expr string) (*big.Float, error) {
 	}
 	if p.pos != len(p.toks) {
 		return nil, errBadToken
-	}
-	if v.IsInf() {
-		return nil, errInfNaN
 	}
 	return v, nil
 }
@@ -180,13 +177,10 @@ func tokenize(expr string) ([]token, error) {
 				// Separator between two word/number tokens: drop it.
 				i++
 			case isDecimalDot(s, i):
-				// A number that begins with a dot, e.g. ".5".
-				num, adv, err := readNumber(s, i)
-				if err != nil {
-					return nil, errBadNumber
-				}
-				toks = append(toks, token{kind: tokNum, val: num})
-				i += adv
+				// A digit on both sides but the number before it has
+				// already been read, so this is a second decimal point,
+				// as in "1.5.2".
+				return nil, errBadNumber
 			default:
 				return nil, errBadToken
 			}
@@ -234,21 +228,14 @@ func isWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
 }
 
-// readNumber reads a numeric literal starting at i and returns it as a
-// *big.Float. The literal is parsed directly from source (not via float64)
+// readNumber reads a numeric literal starting at the digit at i and returns
+// it as a *big.Float. The literal is parsed directly from source (not via float64)
 // so decimal values keep full 1024-bit precision.
 func readNumber(s string, i int) (*big.Float, int, error) {
 	n := len(s)
 	j := i
-	if j < n && (s[j] == '+' || s[j] == '-') {
-		j++
-	}
-	start := j
 	for j < n && isDigit(s[j]) {
 		j++
-	}
-	if j == start {
-		return nil, 0, errBadNumber
 	}
 	// Fractional part: a '.' followed by at least one digit.
 	if j+1 < n && s[j] == '.' && isDigit(s[j+1]) {

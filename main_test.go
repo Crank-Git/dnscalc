@@ -474,3 +474,75 @@ func TestDNSEscapedNames(t *testing.T) {
 		})
 	}
 }
+
+// TestDNSSOA checks NODATA answers carry the zone's SOA in the authority
+// section, with a minimum TTL of ttlError, and that an SOA query at the
+// apex is answered with it.
+func TestDNSSOA(t *testing.T) {
+	port, cleanup := startServer(t, "Calc.Test", "udp")
+	defer cleanup()
+	checkSOA := func(label string, rr dns.RR) {
+		t.Helper()
+		soa, ok := rr.(*dns.SOA)
+		if !ok {
+			t.Fatalf("%s: got %T, want *dns.SOA", label, rr)
+		}
+		if soa.Hdr.Name != "calc.test." || soa.Minttl != ttlError || soa.Hdr.Ttl != ttlError {
+			t.Errorf("%s: SOA name %q minttl %d ttl %d", label, soa.Hdr.Name, soa.Minttl, soa.Hdr.Ttl)
+		}
+		if soa.Ns != "ns.calc.test." || soa.Mbox != "hostmaster.calc.test." {
+			t.Errorf("%s: SOA ns %q mbox %q", label, soa.Ns, soa.Mbox)
+		}
+	}
+	for _, q := range []struct {
+		name  string
+		qtype uint16
+	}{
+		{"2+3.calc.test.", dns.TypeA},
+		{"2+3.CALC.test.", dns.TypeAAAA},
+		{"calc.test.", dns.TypeNS},
+		{"2+3.calc.test.", dns.TypeSOA}, // SOA below the apex: NODATA too
+	} {
+		r := queryNet(t, "udp", port, q.name, q.qtype)
+		label := dns.TypeToString[q.qtype] + " " + q.name
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 || len(r.Ns) != 1 {
+			t.Errorf("%s: rcode %s, %d answers, %d authority; want NODATA with one SOA", label, dns.RcodeToString[r.Rcode], len(r.Answer), len(r.Ns))
+			continue
+		}
+		checkSOA(label, r.Ns[0])
+	}
+	for _, apex := range []string{"calc.test.", "CALC.Test."} {
+		r := queryNet(t, "udp", port, apex, dns.TypeSOA)
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+			t.Errorf("SOA %s: rcode %s, %d answers", apex, dns.RcodeToString[r.Rcode], len(r.Answer))
+			continue
+		}
+		checkSOA("SOA "+apex, r.Answer[0])
+	}
+	// TXT answers and REFUSED carry no authority section.
+	if r := queryNet(t, "udp", port, "2+3.calc.test.", dns.TypeTXT); len(r.Ns) != 0 {
+		t.Errorf("TXT answer has %d authority records", len(r.Ns))
+	}
+	if r := queryNet(t, "udp", port, "2+3.example.org.", dns.TypeA); r.Rcode != dns.RcodeRefused || len(r.Ns) != 0 {
+		t.Errorf("outside zone: rcode %s, %d authority", dns.RcodeToString[r.Rcode], len(r.Ns))
+	}
+}
+
+// TestAnswer pins the TXT text and TTL for each outcome of evaluation.
+func TestAnswer(t *testing.T) {
+	tests := []struct {
+		expr string
+		msg  string
+		ttl  uint32
+	}{
+		{"2+3*4", "14", ttlValid},
+		{"1/0", "error: division by zero", ttlError},
+		{"2^199316", "error: result too large (at least 60001 digits)", ttlError},
+		{"", "error: empty expression", ttlError},
+	}
+	for _, tt := range tests {
+		if msg, ttl := answer(tt.expr); msg != tt.msg || ttl != tt.ttl {
+			t.Errorf("answer(%q) = %q, %d; want %q, %d", tt.expr, msg, ttl, tt.msg, tt.ttl)
+		}
+	}
+}
