@@ -76,3 +76,20 @@ independent; never analyze feasibility") only stopped towers that grew. Every
 base between e^-e and e^(1/e), plus 0 and -1, stays bounded, so
 `1 tet 99999999` or `0.5 tet (10^300)` looped for minutes or forever (#17).
 Settled towers now return in milliseconds with the right value.
+
+## DNS answers
+
+- The zone matches case-insensitively (the `-zone` flag too); the answer
+  echoes the query name in the case it was asked. Why: resolvers using 0x20
+  randomize case and check the reply matches it (#21).
+- The expression is the name before the zone with presentation escapes
+  undone (`\(` → `(`, `\DDD` → that byte), so parentheses and spaces work in
+  names (#23).
+- A result longer than 255 bytes is split into consecutive strings of one
+  TXT record. Over UDP the reply is sized to the client's buffer (512, or
+  its EDNS0 size, with OPT echoed); an answer that does not fit is dropped
+  with TC set so the client retries over TCP (#19).
+- NODATA answers carry the zone SOA in the authority section, minimum TTL
+  60, so resolvers can cache them; an SOA query at the apex is answered
+  (#25).
+- TTLs: 3600 for a value, 60 for an error, so a fix is not hidden for long.

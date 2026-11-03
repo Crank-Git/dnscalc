@@ -12,7 +12,23 @@ $ dig @127.0.0.1 -p 8053 +short TXT '1/0.calc.test'
 "error: division by zero"
 ```
 
+## Install
+
+Prebuilt binaries for macOS, Linux and Windows (amd64 and arm64) are attached
+to each [GitHub release](https://github.com/Crank-Git/dnscalc/releases):
+
+```
+$ curl -LO https://github.com/Crank-Git/dnscalc/releases/latest/download/dnscalc_linux_amd64.tar.gz
+$ tar xzf dnscalc_linux_amd64.tar.gz
+$ ./dnscalc
+```
+
+Each release also has a `dnscalc_<version>_checksums.txt` with SHA-256 sums
+of the archives.
+
 ## Build & run
+
+Requires Go 1.26.5 or newer.
 
 ```
 $ go build -o dnscalc .
@@ -24,7 +40,7 @@ Flags:
 | flag    | default         | meaning                                   |
 |---------|-----------------|-------------------------------------------|
 | `-listen` | `127.0.0.1:8053` | address to serve on (`host:port`)        |
-| `-zone`   | `calc.test.`    | zone suffix expressions hang under        |
+| `-zone`   | `calc.test.`    | zone suffix expressions hang under (any case, trailing dot optional) |
 
 Serves both UDP and TCP. Every query logs one line:
 
@@ -59,6 +75,16 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2 tet 3.calc.test'
 A single label is at most 63 bytes, so split long expressions with `.` at a
 word boundary (`2^100.plus.3^50`).
 
+`dig` reads an argument starting with `-` as an option, so pass such a name
+with `-q`, or start it with the `minus` alias:
+
+```
+$ dig @127.0.0.1 -p 8053 +short -q '-2^2.calc.test' TXT
+"-4"
+$ dig @127.0.0.1 -p 8053 +short TXT 'minus.2^2.calc.test'
+"-4"
+```
+
 ## Operators
 
 Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
@@ -86,7 +112,7 @@ Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
 
 ## Word aliases
 
-Case-insensitive, hostname-safe aliases. Resolvers may randomise case with
+Case-insensitive, hostname-safe aliases. Resolvers may randomize case with
 `0x20`, so both the aliases and the zone match in any case
 (`2.PlUs.3.CaLc.TeSt` works, and `-zone` may be given in any case); the
 answer echoes the name in the case it was asked.
@@ -123,7 +149,8 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 - A negative base with a non-integer exponent (`(0-2)^0.5`) has no real
   result and returns `error: result is not a real number`; `0^-1` is a
   division by zero.
-
+- **Tetration** is limited to 10000 power steps (about a quarter second);
+  see `DECISIONS.md`.
 - **Output cap.** The result string is capped at **60000 characters**
   (`maxResultDigits`); a longer one returns `error: result too large` rather
   than overflowing the packet. This keeps the whole DNS message under the
@@ -155,7 +182,7 @@ scientific notation via a scaled conversion (`2^-200000` →
 `1.0019988054061873...e-60206`), so formatting cost does not grow with how
 small the number is.
 
-## Response behaviour
+## Response behavior
 
 | query                                   | rcode     | answer                                   |
 |-----------------------------------------|-----------|------------------------------------------|
@@ -173,8 +200,10 @@ record back.
 ## Testing
 
 ```
-$ go test ./...            # unit + in-process DNS integration tests
-$ go test -race ./...      # with the race detector
+$ go test ./...            # unit, in-process DNS and e2e tests
+$ go test -short ./...     # skip the e2e tests (no binary build, no dig)
+$ go test -race ./...      # with the race detector (what CI runs)
+$ go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s   # fuzz
 ```
 
 The evaluator has table-driven tests (precedence, unary minus, right-
@@ -193,17 +222,31 @@ installs it and sets `DNSCALC_REQUIRE_DIG=1` so it cannot skip there).
 ## Project layout
 
 ```
-evaluator.go   tokenizer + result formatting (decisions 2 & 5)
-parser.go      recursive-descent parser (decision 3)
+evaluator.go   tokenizer, limits, result formatting
+parser.go      recursive-descent parser, powers, tetration
 bigmath.go     ln / exp over *big.Float for non-integer powers
-main.go        DNS server (decision 6 + flags)
-evaluator_test.go   M1 tests + fuzz target
+main.go        DNS server: zone matching, answers, reply sizing, flags
+DECISIONS.md   the rules the code follows, and why
+evaluator_test.go   evaluator table tests + fuzz target
 limits_test.go      output cap, precision ceiling, magnitude range, formatting cost
 bigmath_test.go     ln / exp / fractional powers against high-precision references
 tetration_test.go   towers: settling, 2-cycles, limits
-main_test.go        M2 in-process integration tests
-e2e_test.go         built binary over real DNS
+main_test.go        in-process DNS tests (UDP and TCP)
+e2e_test.go         built binary over real DNS, including dig
+.goreleaser.yml     release builds
 ```
 
 Milestones ship as separate PRs: M1 evaluator, M2 server, M3 README +
 CI, M4a tetration operator, M4c big.Float precision and output cap.
+v0.2.0 hardens all of it: no crashing or unbounded queries, full-precision
+fractional powers, towers that settle, long answers delivered, and
+case-insensitive zones (#7–#26).
+
+## Releasing
+
+Tag `main` and run goreleaser with a GitHub token:
+
+```
+$ git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+$ GITHUB_TOKEN=$(gh auth token) goreleaser release --clean
+```

@@ -41,7 +41,7 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	qname := q.Name
 
 	// Name outside the zone -> REFUSED. Names compare case-insensitively:
-	// resolvers using 0x20 randomise the case of every query.
+	// resolvers using 0x20 randomize the case of every query.
 	lname := strings.ToLower(qname)
 	if lname != h.zone && !strings.HasSuffix(lname, "."+h.zone) {
 		m.Rcode = dns.RcodeRefused
