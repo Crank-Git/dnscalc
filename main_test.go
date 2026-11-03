@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math/big"
 	"net"
 	"strconv"
 	"strings"
@@ -80,7 +81,12 @@ func txt(t *testing.T, rr dns.RR) string {
 	if len(txt.Txt) == 0 {
 		t.Fatalf("empty TXT body")
 	}
-	return txt.Txt[0]
+	for i, part := range txt.Txt {
+		if len(part) > maxTXTString {
+			t.Fatalf("TXT string %d is %d bytes, over %d", i, len(part), maxTXTString)
+		}
+	}
+	return strings.Join(txt.Txt, "")
 }
 
 func TestDNSServerResponses(t *testing.T) {
@@ -250,4 +256,114 @@ func queryNet(t *testing.T, network string, port int, name string, qtype uint16)
 		t.Fatalf("%s query %s: %v", network, name, err)
 	}
 	return r
+}
+
+func TestSplitTXT(t *testing.T) {
+	for _, n := range []int{1, 254, 255, 256, 509, 510, 511, 60000} {
+		s := strings.Repeat("7", n-1) + "x"
+		parts := splitTXT(s)
+		if want := (n + maxTXTString - 1) / maxTXTString; len(parts) != want {
+			t.Errorf("n=%d: %d strings, want %d", n, len(parts), want)
+		}
+		for i, p := range parts {
+			if i < len(parts)-1 && len(p) != maxTXTString {
+				t.Errorf("n=%d: string %d is %d bytes, want %d", n, i, len(p), maxTXTString)
+			}
+			if len(p) == 0 || len(p) > maxTXTString {
+				t.Errorf("n=%d: string %d is %d bytes", n, i, len(p))
+			}
+		}
+		if strings.Join(parts, "") != s {
+			t.Errorf("n=%d: parts do not rejoin to the input", n)
+		}
+	}
+}
+
+// exchange sends one TXT query for name, optionally with an EDNS0 OPT
+// advertising ednsSize, and returns the reply.
+func exchange(t *testing.T, network string, port int, name string, ednsSize uint16) *dns.Msg {
+	t.Helper()
+	c := &dns.Client{Net: network, Timeout: 3 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
+	if ednsSize != 0 {
+		m.SetEdns0(ednsSize, false)
+	}
+	r, _, err := c.Exchange(m, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("%s query %s (edns %d): %v", network, name, ednsSize, err)
+	}
+	return r
+}
+
+// TestDNSLongResults checks results longer than one TXT string are delivered
+// whole: split into <=255-byte strings, truncated with TC over UDP when they
+// exceed the client's buffer, and served in full over TCP up to the output
+// cap, including with a long query name.
+func TestDNSLongResults(t *testing.T) {
+	udpPort, cleanUDP := startServer(t, "calc.test.", "udp")
+	defer cleanUDP()
+	tcpPort, cleanTCP := startServer(t, "calc.test.", "tcp")
+	defer cleanTCP()
+
+	pow2 := func(n uint) string { return new(big.Int).Lsh(big.NewInt(1), n).String() }
+	// A ~200-byte name: 2^199313 plus thirty "plus.0" labels.
+	longName := "2^199313" + strings.Repeat(".plus.0", 30) + ".calc.test"
+
+	tests := []struct {
+		qname     string
+		want      string
+		plainFits bool // fits a 512-byte UDP reply
+		ednsFits  bool // fits a 4096-byte EDNS0 UDP reply
+	}{
+		{"2^800.calc.test", pow2(800), true, true},
+		{"2^900.calc.test", pow2(900), true, true},
+		{"1/3.calc.test", "0." + strings.Repeat("3", 300), true, true},
+		{"2^5000.calc.test", pow2(5000), false, true},
+		{"2^199313.calc.test", pow2(199313), false, false},
+		{longName, pow2(199313), false, false},
+	}
+	for _, tt := range tests {
+		name := tt.qname
+		if len(name) > 40 {
+			name = name[:40] + "..."
+		}
+		t.Run(name, func(t *testing.T) {
+			check := func(label string, r *dns.Msg, fits bool) {
+				t.Helper()
+				if r.Rcode != dns.RcodeSuccess {
+					t.Fatalf("%s: rcode %s", label, dns.RcodeToString[r.Rcode])
+				}
+				if !fits {
+					if !r.Truncated || len(r.Answer) != 0 {
+						t.Fatalf("%s: TC=%v with %d answers, want TC and no answer", label, r.Truncated, len(r.Answer))
+					}
+					return
+				}
+				if r.Truncated || len(r.Answer) != 1 {
+					t.Fatalf("%s: TC=%v with %d answers, want the full answer", label, r.Truncated, len(r.Answer))
+				}
+				if got := txt(t, r.Answer[0]); got != tt.want {
+					t.Fatalf("%s: got %d chars, want %d (%.20s...)", label, len(got), len(tt.want), tt.want)
+				}
+			}
+			plain := exchange(t, "udp", udpPort, tt.qname, 0)
+			check("udp", plain, tt.plainFits)
+			if plain.IsEdns0() != nil {
+				t.Errorf("udp: reply has OPT but the query had none")
+			}
+			edns := exchange(t, "udp", udpPort, tt.qname, 4096)
+			check("udp+edns", edns, tt.ednsFits)
+			if edns.IsEdns0() == nil {
+				t.Errorf("udp+edns: reply has no OPT record")
+			}
+			check("tcp", exchange(t, "tcp", tcpPort, tt.qname, 0), true)
+		})
+	}
+
+	// Past the cap: an error, small enough for plain UDP.
+	r := exchange(t, "udp", udpPort, "2^199316.calc.test", 0)
+	if r.Truncated || len(r.Answer) != 1 || !strings.HasPrefix(txt(t, r.Answer[0]), "error: result too large") {
+		t.Fatalf("2^199316: TC=%v answers=%d, want an error TXT", r.Truncated, len(r.Answer))
+	}
 }

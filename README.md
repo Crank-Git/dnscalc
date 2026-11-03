@@ -112,11 +112,15 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 - **Output cap.** The result string is capped at **60000 characters**
   (`maxResultDigits`); a longer one returns `error: result too large` rather
   than overflowing the packet. This keeps the whole DNS message under the
-  65535-byte limit: a 60000-character answer comes back as a ~60063-byte
-  message (~63 bytes of header/question/answer overhead for a typical query,
-  which grows with the query name). 65535 is a hard structural ceiling, not a
-  policy choice — it is the 16-bit length field on both the UDP datagram and
-  the TCP frame.
+  65535-byte limit, the 16-bit length field on both the UDP datagram and the
+  TCP frame.
+- **Long answers.** A TXT character-string holds at most 255 bytes, so a
+  longer result is split into consecutive strings of one TXT record
+  (`dig +short` prints them as `"…" "…"`; join them to get the number). Over
+  UDP the reply is sized to the client's buffer, 512 bytes or its EDNS0
+  size; an answer that does not fit comes back empty with TC set and clients
+  such as `dig` retry over TCP automatically. A 60000-digit answer with a
+  200-byte query name is about 60.5 KB over TCP.
 - **Precision ceiling.** The core is a single `*big.Float` at 1024-bit
   precision, so results are exact only while the true value needs ≤ 1024
   significant bits (~309 decimal digits for a general integer). Larger
@@ -146,7 +150,9 @@ small the number is.
 | name outside the zone                   | REFUSED   | —                                        |
 | internal error (handler panic)          | SERVFAIL  | —                                        |
 
-Responses set the AA flag.
+Responses set the AA flag. A UDP reply too large for the client's buffer
+has TC set and no answer; retry over TCP. A query with EDNS0 gets an OPT
+record back.
 
 ## Testing
 
