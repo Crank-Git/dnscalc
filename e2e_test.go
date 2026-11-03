@@ -66,7 +66,9 @@ func TestE2EBinary(t *testing.T) {
 	}
 
 	port := freePort(t)
-	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "-zone", "calc.test.")
+	// Zone flag in mixed case without the trailing dot: queries below use
+	// another case and must still match.
+	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "-zone", "Calc.Test")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -96,6 +98,7 @@ func TestE2EBinary(t *testing.T) {
 		{"huge-power", "2^2^2^30.calc.test", "error: result too large"},
 		{"tiny-power", "2^-2^24.calc.test", "error: result too small"},
 		{"mult-before-add", "2+3*4.calc.test", "14"},
+		{"zone-0x20", "2+3*4.cAlC.TeSt", "14"},
 		{"decimal", "1.5*2.calc.test", "3"},
 		{"division-by-zero", "1/0.calc.test", "error: division by zero"},
 		{"pow-alias", "2.pow.3.calc.test", "8"},
