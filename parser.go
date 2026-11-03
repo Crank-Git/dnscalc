@@ -18,7 +18,7 @@ package main
 //
 // Powers are computed by powBig: an integer exponent uses binary
 // exponentiation (exact for powers of small integers, e.g. 2^80000000); a
-// non-integer exponent falls back to float64 math.Pow widened to *big.Float.
+// non-integer exponent is e^(exp·ln base) at full precision (bigmath.go).
 
 import (
 	"math"
@@ -280,8 +280,8 @@ func checkRange(v *big.Float) error {
 
 // powBig computes base^exp at fixed precision. An integer exponent uses
 // binary exponentiation (exact for powers of small integers, e.g. 2^80000000
-// is one significant bit); a non-integer exponent falls back to float64
-// math.Pow widened to *big.Float.
+// is one significant bit); a non-integer exponent is e^(exp·ln base),
+// computed at workPrec and rounded to prec.
 //
 // Undefined cases are errors rather than NaN: a zero base with a negative
 // exponent is a division by zero, and a negative base with a non-integer
@@ -324,10 +324,8 @@ func powBig(base, exp *big.Float) (*big.Float, error) {
 		r := one.Quo(one, inv)
 		return r, checkRange(r)
 	}
-	// Non-integer exponent: float64 precision, widened to *big.Float.
-	b, _ := base.Float64()
-	e, _ := exp.Float64()
-	v := newBig().SetFloat64(math.Pow(b, e))
+	// Non-integer exponent (base > 0). estimatePow bounded |exp·ln base|.
+	v := newBig().Set(bigExp(newWork().Mul(exp, bigLn(base))))
 	return v, checkRange(v)
 }
 
