@@ -36,6 +36,12 @@ import (
 // arithmetic and powers use it; there is no float64 path in the core.
 const prec = 1024
 
+// outputDigits is how many significant digits a non-integer result prints
+// with (trailing zeros trimmed). A 1024-bit mantissa holds ~308, so the last
+// few, where rounding noise from ln/exp or from an inexact binary fraction
+// lives, are dropped: 2^0.5*2^0.5 prints 2, not 2.000...0002.
+const outputDigits = 300
+
 // maxResultDigits is the output cap (M4): a decimal result longer than this
 // is rejected instead of being emitted. The bound is set by the DNS message
 // size itself: every DNS packet is length-prefixed to 16 bits, so the whole
@@ -270,7 +276,8 @@ func readWord(s string, i int) (string, int) {
 
 // formatResult renders a result per decision 5: integral values print
 // without a decimal point ("14", "-4") via (*big.Float).Int(); everything
-// else uses the shortest round-tripping representation (big.Float 'g', -1).
+// else prints outputDigits significant digits, trailing zeros trimmed
+// (big.Float 'g', outputDigits).
 //
 // It also enforces the M4 output cap: a decimal result longer than
 // maxResultDigits characters returns errResultTooLarge instead of the number.
@@ -292,7 +299,7 @@ func formatResult(f *big.Float) (string, error) {
 	case e2 < -tinyFormatBits:
 		s = formatTiny(f)
 	default:
-		s = f.Text('g', -1)
+		s = f.Text('g', outputDigits)
 	}
 	if len(s) > maxResultDigits {
 		return "", fmt.Errorf("%w (%d digits)", errResultTooLarge, len(s))
@@ -321,8 +328,9 @@ func formatTiny(f *big.Float) string {
 	}
 	y := new(big.Float).SetPrec(work).Mul(f, scale)
 	y.SetPrec(prec)
-	s := y.Text('e', -1) // e.g. "1.0020841800044864e+00"
+	s := y.Text('e', outputDigits-1) // e.g. "1.00199880540618737900e+00"
 	i := strings.LastIndexByte(s, 'e')
 	ye, _ := strconv.Atoi(s[i+1:])
-	return fmt.Sprintf("%se%+03d", s[:i], ye+k)
+	mant := strings.TrimRight(strings.TrimRight(s[:i], "0"), ".")
+	return fmt.Sprintf("%se%+03d", mant, ye+k)
 }

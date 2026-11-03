@@ -271,27 +271,20 @@ func TestFormatTiny(t *testing.T) {
 	}
 }
 
-// TestFormatTinyMatchesExact checks the scaled formatter against big.Float's
-// exact conversion where the latter is still affordable.
+// TestFormatTinyMatchesExact checks the scaled formatter produces exactly
+// the string big.Float's exact conversion would (at outputDigits, zeros
+// trimmed), where the exact conversion is still affordable.
 func TestFormatTinyMatchesExact(t *testing.T) {
-	for _, e := range []int{-1101, -1500, -4000, -12000} {
-		for _, m := range []int64{1, 3, 7, 12345} {
+	for _, e := range []int{-1101, -1500, -4000, -12000, -30000} {
+		for _, m := range []int64{1, 3, 7, 12345, -5} {
 			f := newBig().SetMantExp(newBig().SetInt64(m), e)
 			f.Quo(f, newBig().SetInt64(3)) // full-length mantissa
 			got := formatTiny(f)
-			exact := f.Text('g', -1)
-			gp, _ := newBig().SetString(got)
-			if gp.Cmp(f) != 0 {
-				// Same value to within the last couple of ulps.
-				d := newBig().Sub(gp, f)
-				d.Quo(d, f).Abs(d)
-				if d.Cmp(newBig().SetMantExp(newBig().SetInt64(1), -1018)) > 0 {
-					t.Errorf("m=%d e=%d: formatTiny=%s exact=%s (rel diff %s)", m, e, got, exact, d.Text('g', 3))
-				}
-			}
-			// Same decimal exponent as the exact conversion.
-			if got[strings.LastIndexByte(got, 'e'):] != exact[strings.LastIndexByte(exact, 'e'):] {
-				t.Errorf("m=%d e=%d: exponent of %s differs from exact %s", m, e, got[strings.LastIndexByte(got, 'e'):], exact[strings.LastIndexByte(exact, 'e'):])
+			s := f.Text('e', outputDigits-1)
+			i := strings.LastIndexByte(s, 'e')
+			want := strings.TrimRight(strings.TrimRight(s[:i], "0"), ".") + s[i:]
+			if got != want {
+				t.Errorf("m=%d e=%d:\n formatTiny = %s\n exact      = %s", m, e, got, want)
 			}
 		}
 	}

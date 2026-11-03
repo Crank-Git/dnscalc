@@ -56,6 +56,9 @@ Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
 ```
 
 - Unary minus is supported.
+- Non-integer powers are computed as `e^(exp·ln base)` at full precision
+  (`2^0.5` is √2 to 300 digits, `(10^400)^0.5` is exactly 10^200). A
+  negative base with a non-integer exponent is an error.
 - `^` is right-associative and binds **tighter** than unary minus, so
   `-2^2 == -4` (i.e. `-(2^2)`) and `2^3^2 == 512` (i.e. `2^(3^2)`).
 - `tet` (tetration, `a tet b` = a↑↑b) binds **tighter** than `^`, so
@@ -121,8 +124,10 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
 ## Output formatting
 
 Integral results print with no decimal point (`14`, not `14.000000`);
-everything else uses the shortest round-tripping representation
-(`strconv` `%g`, precision `-1`). Numbers smaller than 2^-1100 print in
+everything else prints **300 significant digits** with trailing zeros
+trimmed (`%g`, precision 300). The 1024-bit mantissa holds ~308 digits, so
+the last few, where rounding noise lives, are dropped: `2^0.5*2^0.5` is `2`,
+`1/3*3` is `1`, `0.1+0.2` is `0.3`. Numbers smaller than 2^-1100 print in
 scientific notation via a scaled conversion (`2^-200000` →
 `1.0019988054061873...e-60206`), so formatting cost does not grow with how
 small the number is.
@@ -159,10 +164,13 @@ output: the 60000-character output cap (`TestOutputCapBoundary`) and the
 ```
 evaluator.go   tokenizer + result formatting (decisions 2 & 5)
 parser.go      recursive-descent parser (decision 3)
+bigmath.go     ln / exp over *big.Float for non-integer powers
 main.go        DNS server (decision 6 + flags)
 evaluator_test.go   M1 tests + fuzz target
-limits_test.go      M4c output-cap and precision-ceiling tests
+limits_test.go      output cap, precision ceiling, magnitude range, formatting cost
+bigmath_test.go     ln / exp / fractional powers against high-precision references
 main_test.go        M2 in-process integration tests
+e2e_test.go         built binary over real DNS
 ```
 
 Milestones ship as separate PRs: M1 evaluator, M2 server, M3 README +
