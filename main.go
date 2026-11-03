@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -32,7 +33,7 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 	if len(req.Question) == 0 {
 		m.Rcode = dns.RcodeFormatError
-		w.WriteMsg(m)
+		writeReply(w, req, m)
 		return
 	}
 	q := req.Question[0]
@@ -42,14 +43,14 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	if qname != h.zone && !strings.HasSuffix(qname, "."+h.zone) {
 		m.Rcode = dns.RcodeRefused
 		log.Printf("qname=%s qtype=%s rcode=%s result=-\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode])
-		w.WriteMsg(m)
+		writeReply(w, req, m)
 		return
 	}
 
 	// Non-TXT under the zone -> NOERROR, empty answer (NODATA).
 	if q.Qtype != dns.TypeTXT {
 		log.Printf("qname=%s qtype=%s rcode=%s result=-\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode])
-		w.WriteMsg(m)
+		writeReply(w, req, m)
 		return
 	}
 
@@ -65,7 +66,7 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		msg := "error: " + err.Error()
 		m.Answer = []dns.RR{&dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlError},
-			Txt: []string{msg},
+			Txt: splitTXT(msg),
 		}}
 		line(msg)
 	} else if msg, err := formatResult(result); err != nil {
@@ -73,17 +74,55 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		msg := "error: " + err.Error()
 		m.Answer = []dns.RR{&dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlError},
-			Txt: []string{msg},
+			Txt: splitTXT(msg),
 		}}
 		line(msg)
 	} else {
 		m.Answer = []dns.RR{&dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlValid},
-			Txt: []string{msg},
+			Txt: splitTXT(msg),
 		}}
 		line(msg)
 	}
-	w.WriteMsg(m)
+	writeReply(w, req, m)
+}
+
+// maxTXTString is the most bytes one TXT character-string can hold: its
+// length is a single byte on the wire.
+const maxTXTString = 255
+
+// splitTXT splits s into the character-strings of one TXT record, each at
+// most maxTXTString bytes. Clients concatenate them to recover s.
+func splitTXT(s string) []string {
+	var out []string
+	for len(s) > maxTXTString {
+		out = append(out, s[:maxTXTString])
+		s = s[maxTXTString:]
+	}
+	return append(out, s)
+}
+
+// writeReply sends m, sized for the transport. Over UDP the reply must fit
+// the client's buffer: 512 bytes, or the EDNS0 size it advertised (an OPT
+// record is echoed back). An answer that does not fit is dropped and TC set,
+// so the client retries over TCP, which carries up to 65535 bytes. A failed
+// write is logged.
+func writeReply(w dns.ResponseWriter, req, m *dns.Msg) {
+	_, udp := w.RemoteAddr().(*net.UDPAddr)
+	size := dns.MaxMsgSize
+	if udp {
+		size = dns.MinMsgSize
+	}
+	if opt := req.IsEdns0(); opt != nil {
+		m.SetEdns0(dns.DefaultMsgSize, false)
+		if udp && int(opt.UDPSize()) > size {
+			size = int(opt.UDPSize())
+		}
+	}
+	m.Truncate(size)
+	if err := w.WriteMsg(m); err != nil {
+		log.Printf("write reply to %s for %v: %v", w.RemoteAddr(), req.Question, err)
+	}
 }
 
 // recoverHandler answers SERVFAIL instead of letting a panic in next take

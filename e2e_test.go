@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"math/big"
 	"net"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +119,55 @@ func TestE2EBinary(t *testing.T) {
 				t.Errorf("query %s: TXT = %q, want %q", tt.qname, got, tt.wantTxt)
 			}
 		})
+	}
+}
+
+// TestE2EDig checks long results with the real dig against the built binary:
+// dig retries a truncated UDP reply over TCP on its own, and prints the TXT
+// strings separately, which must rejoin to the full number.
+func TestE2EDig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e in -short mode")
+	}
+	dig, err := exec.LookPath("dig")
+	if err != nil {
+		t.Skip("dig not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dnscalc")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build binary: %v\n%s", err, out)
+	}
+	port := freePort(t)
+	cmd := exec.Command(bin, "-listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start binary: %v", err)
+	}
+	defer cmd.Process.Kill()
+	waitReady(t, port, 5*time.Second)
+
+	pow2 := func(n uint) string { return new(big.Int).Lsh(big.NewInt(1), n).String() }
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"TXT", "2+3*4.calc.test"}, "14"},
+		{[]string{"TXT", "1/3.calc.test"}, "0." + strings.Repeat("3", 300)},
+		{[]string{"TXT", "2^5000.calc.test"}, pow2(5000)},                  // UDP truncated, dig retries TCP
+		{[]string{"+bufsize=4096", "TXT", "2^5000.calc.test"}, pow2(5000)}, // fits EDNS0 UDP
+		{[]string{"+tcp", "TXT", "2^199313.calc.test"}, pow2(199313)},
+		{[]string{"TXT", "2^199313.calc.test"}, pow2(199313)},
+	}
+	for _, tt := range tests {
+		args := append([]string{"@127.0.0.1", "-p", strconv.Itoa(port), "+short", "+tries=1", "+time=3"}, tt.args...)
+		out, err := exec.Command(dig, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("dig %v: %v\n%s", tt.args, err, out)
+		}
+		// dig prints each TXT string quoted, separated by spaces.
+		got := strings.NewReplacer("\"", "", " ", "", "\n", "").Replace(string(out))
+		if got != tt.want {
+			t.Errorf("dig %v: got %d chars (%.40q), want %d", tt.args, len(got), got, len(tt.want))
+		}
 	}
 }
