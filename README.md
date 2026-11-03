@@ -161,7 +161,8 @@ small the number is.
 |-----------------------------------------|-----------|------------------------------------------|
 | TXT, valid expression under the zone    | NOERROR   | TXT `<result>`, TTL 3600                 |
 | TXT, invalid expression under the zone  | NOERROR   | TXT `error: <reason>`, TTL 60            |
-| other qtype under the zone              | NOERROR   | empty answer (NODATA)                    |
+| other qtype under the zone              | NOERROR   | empty answer (NODATA), zone SOA in authority |
+| SOA at the zone apex                    | NOERROR   | the zone SOA                             |
 | name outside the zone                   | REFUSED   | —                                        |
 | internal error (handler panic)          | SERVFAIL  | —                                        |
 
@@ -182,7 +183,12 @@ target (`FuzzEvaluate`) that must never panic.
 
 `limits_test.go` pins the two ceilings that bound how large a number we can
 output: the 60000-character output cap (`TestOutputCapBoundary`) and the
-1024-bit precision limit (`TestPrecisionBitLimit`).
+1024-bit precision limit (`TestPrecisionBitLimit`), plus the value range and
+the cost of formatting. `bigmath_test.go` and `tetration_test.go` check
+fractional powers and towers against references computed independently with
+Python's `decimal` module. `e2e_test.go` builds the binary and queries it
+over real DNS, including with `dig` (skipped if `dig` is not installed; CI
+installs it and sets `DNSCALC_REQUIRE_DIG=1` so it cannot skip there).
 
 ## Project layout
 
@@ -194,6 +200,7 @@ main.go        DNS server (decision 6 + flags)
 evaluator_test.go   M1 tests + fuzz target
 limits_test.go      output cap, precision ceiling, magnitude range, formatting cost
 bigmath_test.go     ln / exp / fractional powers against high-precision references
+tetration_test.go   towers: settling, 2-cycles, limits
 main_test.go        M2 in-process integration tests
 e2e_test.go         built binary over real DNS
 ```

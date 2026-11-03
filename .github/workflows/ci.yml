@@ -30,8 +30,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # dig for the e2e test; DNSCALC_REQUIRE_DIG makes it fail, not skip,
+      # if dig is missing.
+      - name: install dig
+        run: command -v dig || (sudo apt-get update && sudo apt-get install -y dnsutils)
+
       # Tests with the race detector.
       - name: go test -race
+        env:
+          DNSCALC_REQUIRE_DIG: "1"
         run: go test -race ./...
 
       # Fuzz run: must never panic.

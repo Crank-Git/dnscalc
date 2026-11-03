@@ -100,7 +100,7 @@ func (p *parser) parseExpr() (*big.Float, error) {
 	for {
 		t := p.cur()
 		op, ok := p.binaryOp(t)
-		if !ok {
+		if !ok || (op != '+' && op != '-') {
 			break
 		}
 		p.advance()
@@ -108,22 +108,10 @@ func (p *parser) parseExpr() (*big.Float, error) {
 		if err != nil {
 			return nil, err
 		}
-		switch op {
-		case '+':
+		if op == '+' {
 			v.Add(v, rhs)
-		case '-':
+		} else {
 			v.Sub(v, rhs)
-		case '*':
-			v.Mul(v, rhs)
-		case '/':
-			if rhs.Sign() == 0 {
-				return nil, errDivisionZero
-			}
-			v.Quo(v, rhs)
-		case '^':
-			if v, err = powBig(v, rhs); err != nil {
-				return nil, err
-			}
 		}
 		if err := checkRange(v); err != nil {
 			return nil, err

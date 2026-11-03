@@ -50,8 +50,19 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// Non-TXT under the zone -> NOERROR, empty answer (NODATA).
+	// SOA at the apex -> the zone's SOA.
+	if q.Qtype == dns.TypeSOA && lname == h.zone {
+		m.Answer = []dns.RR{h.soa()}
+		log.Printf("qname=%s qtype=%s rcode=%s result=-\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode])
+		writeReply(w, req, m)
+		return
+	}
+
+	// Non-TXT under the zone -> NOERROR, empty answer (NODATA), with the
+	// SOA in the authority section so resolvers can cache the negative
+	// answer.
 	if q.Qtype != dns.TypeTXT {
+		m.Ns = []dns.RR{h.soa()}
 		log.Printf("qname=%s qtype=%s rcode=%s result=-\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode])
 		writeReply(w, req, m)
 		return
@@ -63,34 +74,42 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	// space as "\ "; unescape before evaluating.
 	expr := unescapeName(strings.TrimSuffix(qname[:len(qname)-len(h.zone)], "."))
 
-	result, err := evaluate(expr)
-	line := func(res string) {
-		log.Printf("qname=%s qtype=%s rcode=%s result=%s\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode], res)
-	}
-
-	if err != nil {
-		msg := "error: " + err.Error()
-		m.Answer = []dns.RR{&dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlError},
-			Txt: splitTXT(msg),
-		}}
-		line(msg)
-	} else if msg, err := formatResult(result); err != nil {
-		// Output cap (M4): the value is finite but too large to emit.
-		msg := "error: " + err.Error()
-		m.Answer = []dns.RR{&dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlError},
-			Txt: splitTXT(msg),
-		}}
-		line(msg)
-	} else {
-		m.Answer = []dns.RR{&dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttlValid},
-			Txt: splitTXT(msg),
-		}}
-		line(msg)
-	}
+	msg, ttl := answer(expr)
+	m.Answer = []dns.RR{&dns.TXT{
+		Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttl},
+		Txt: splitTXT(msg),
+	}}
+	log.Printf("qname=%s qtype=%s rcode=%s result=%s\n", qname, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode], msg)
 	writeReply(w, req, m)
+}
+
+// answer evaluates expr and returns the TXT text with its TTL: the formatted
+// result with ttlValid, or "error: <reason>" with ttlError when evaluating
+// or formatting (the output cap) fails.
+func answer(expr string) (string, uint32) {
+	v, err := evaluate(expr)
+	if err == nil {
+		var s string
+		if s, err = formatResult(v); err == nil {
+			return s, ttlValid
+		}
+	}
+	return "error: " + err.Error(), ttlError
+}
+
+// soa is the zone's SOA record. Its minimum TTL, ttlError, is how long
+// resolvers cache a NODATA answer.
+func (h *handler) soa() dns.RR {
+	return &dns.SOA{
+		Hdr:     dns.RR_Header{Name: h.zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: ttlError},
+		Ns:      "ns." + h.zone,
+		Mbox:    "hostmaster." + h.zone,
+		Serial:  1,
+		Refresh: 3600,
+		Retry:   600,
+		Expire:  86400,
+		Minttl:  ttlError,
+	}
 }
 
 // unescapeName undoes the presentation-format escaping miekg/dns applies to
