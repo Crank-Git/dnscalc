@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,8 +156,9 @@ func TestDNSServerTCP(t *testing.T) {
 }
 
 // TestDNSServerUndefinedResults sends every expression that used to panic
-// the process (NaN / infinity in math/big) and checks each one is answered
-// with an error TXT, then that the server still answers a normal query.
+// the process (NaN / infinity in math/big) or run without bound (huge powers,
+// towers of height 10^300) and checks each is answered promptly with the
+// right TXT, then that the server still answers a normal query.
 func TestDNSServerUndefinedResults(t *testing.T) {
 	for _, network := range []string{"udp", "tcp"} {
 		t.Run(network, func(t *testing.T) {
@@ -176,6 +178,10 @@ func TestDNSServerUndefinedResults(t *testing.T) {
 				{"2^2^2^30.calc.test", "error: result too large"},
 				{"2^-2^24.calc.test", "error: result too small"},
 				{"0^lp.0-1.rp.calc.test", "error: division by zero"},
+				{"1.tet.lp.10.pow.300.rp.calc.test", "1"},
+				{"0.tet.lp.10.pow.300.rp.calc.test", "1"},
+				{"0.tet.lp.10.pow.300.plus.1.rp.calc.test", "0"},
+				{"2.tet.lp.10.pow.300.rp.calc.test", "error: result too large"},
 			}
 			for _, tt := range tests {
 				r := queryNet(t, network, port, tt.qname, dns.TypeTXT)
@@ -190,8 +196,12 @@ func TestDNSServerUndefinedResults(t *testing.T) {
 				if got := txt(t, r.Answer[0]); got != tt.wantTxt {
 					t.Errorf("%s: TXT = %q, want %q", tt.qname, got, tt.wantTxt)
 				}
-				if ttl := r.Answer[0].Header().Ttl; ttl != ttlError {
-					t.Errorf("%s: TTL = %d, want %d", tt.qname, ttl, ttlError)
+				wantTTL := uint32(ttlValid)
+				if strings.HasPrefix(tt.wantTxt, "error: ") {
+					wantTTL = ttlError
+				}
+				if ttl := r.Answer[0].Header().Ttl; ttl != wantTTL {
+					t.Errorf("%s: TTL = %d, want %d", tt.qname, ttl, wantTTL)
 				}
 			}
 

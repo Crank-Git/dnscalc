@@ -98,6 +98,8 @@ func TestE2EBinary(t *testing.T) {
 		{"division-by-zero", "1/0.calc.test", "error: division by zero"},
 		{"pow-alias", "2.pow.3.calc.test", "8"},
 		{"tetration", "2.tet.3.calc.test", "16"},
+		{"tetration-settles", "1.tet.lp.10.pow.300.rp.calc.test", "1"},
+		{"tetration-two-cycle", "0.tet.lp.10.pow.300.plus.1.rp.calc.test", "0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

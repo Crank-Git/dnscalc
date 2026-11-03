@@ -64,10 +64,11 @@ const maxMagnitudeBits = 1 << 20
 // the square of its binary exponent (2^-200000 takes over a second).
 const tinyFormatBits = 1100
 
-// tetThreshold is the base-independent too-large bound for tetration (M4a):
-// before each iterated power step, an already-exceeding running result is
-// rejected with errResultTooLarge instead of computing the next power.
-const tetThreshold = 200000
+// maxTetSteps caps the power steps one tetration may take (DECISIONS.md),
+// bounding a tower at roughly a quarter second of CPU. Towers settle well
+// within it (2^0.5: ~900 steps, 1.44: ~5400, 0.05: ~7300); only bases very
+// close to e^(1/e) ~ 1.4447 or e^-e ~ 0.066, such as 1.444 or 0.07, reach it.
+const maxTetSteps = 10000
 
 var (
 	errTokenLimit     = errors.New("too many tokens (max 64)")
@@ -81,6 +82,7 @@ var (
 	errResultTooLarge = errors.New("result too large")
 	errResultTooSmall = errors.New("result too small")
 	errTetHeight      = errors.New("tetration height must be a non-negative integer")
+	errTetSteps       = errors.New("tetration does not settle within 10000 steps")
 	errNotReal        = errors.New("result is not a real number")
 )
 
