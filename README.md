@@ -8,6 +8,7 @@
   <a href="https://github.com/Crank-Git/dnscalc/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Crank-Git/dnscalc/ci.yml?branch=main&style=flat-square&label=ci&labelColor=30363d"></a>
   <a href="https://github.com/Crank-Git/dnscalc/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Crank-Git/dnscalc?style=flat-square&labelColor=30363d&color=7ee787"></a>
   <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/Crank-Git/dnscalc?style=flat-square&label=go&labelColor=30363d&color=7ee787">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-7ee787?style=flat-square&labelColor=30363d"></a>
 </p>
 
 <p align="center">
@@ -139,6 +140,10 @@ $ go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s   # fuzz
 `dig` isn't installed, unless `DNSCALC_REQUIRE_DIG=1` is set, which is how CI runs it.
 `bigmath_test.go` and `tetration_test.go` check fractional powers and towers against
 references computed separately with Python's `decimal` module.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ---
 
