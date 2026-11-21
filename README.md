@@ -1,69 +1,107 @@
-# dnscalc
+<p align="center">
+  <img src="assets/brand/banner.svg" alt="dnscalc: a terminal running dig @127.0.0.1 -p 8053 +short TXT '2+3*4.calc.test', which answers &quot;14&quot;." width="100%">
+</p>
 
-dnscalc is a DNS server that evaluates math. Query a TXT record whose name
-is an expression; the answer is a TXT record holding the result.
+<p align="center"><b>A DNS server that evaluates math.</b> The query name is the expression, and the TXT answer is the result.</p>
 
+<p align="center">
+  <a href="https://github.com/Crank-Git/dnscalc/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Crank-Git/dnscalc/ci.yml?branch=main&style=flat-square&label=ci&labelColor=30363d"></a>
+  <a href="https://github.com/Crank-Git/dnscalc/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Crank-Git/dnscalc?style=flat-square&labelColor=30363d&color=7ee787"></a>
+  <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/Crank-Git/dnscalc?style=flat-square&label=go&labelColor=30363d&color=7ee787">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-7ee787?style=flat-square&labelColor=30363d"></a>
+</p>
+
+<p align="center">
+  <a href="docs/reference.md"><b>Docs</b></a> ·
+  <a href="#install"><b>Install</b></a> ·
+  <a href="#quick-start"><b>Quick start</b></a> ·
+  <a href="https://github.com/Crank-Git/dnscalc/releases"><b>Releases</b></a>
+</p>
+
+```mermaid
+flowchart LR
+    dig -- "TXT 2+3*4.calc.test" --> server[dnscalc]
+    server -- "2+3*4" --> parser["parser, big.Float"]
+    parser -- "14" --> server
+    server -- "TXT &quot;14&quot;" --> dig
 ```
-$ dig @127.0.0.1 -p 8053 +short TXT '2+3*4.calc.test'
-"14"
-$ dig @127.0.0.1 -p 8053 +short TXT '1.5*2.calc.test'
-"3"
-$ dig @127.0.0.1 -p 8053 +short TXT '1/0.calc.test'
-"error: division by zero"
-```
+
+## Why dnscalc
+
+DNS will carry a surprising amount if you treat the query name as input. dnscalc takes
+that literally: every label in front of the zone is the expression, and the answer comes
+back as a TXT record. Any resolver or `dig` you already have is the client.
+
+The parser is hand-written recursive descent over `*big.Float` at 1024-bit precision, with
+no `eval`, no shelling out, and no expression library. It handles `+ - * / ^`, unary minus,
+parentheses, and `tet` for tetration.
+
+The hard part was making a single query safe. Values are range-checked as soon as they're
+produced, powers are estimated before they're computed, towers stop as soon as they settle,
+and a result too long for one TXT string gets split across several so it still arrives.
+
+## Requirements
+
+- **`dig`**, or any DNS client that can send a TXT query to a custom port.
+- **Go 1.26.5 or later**, only if you build from source or run the tests.
 
 ## Install
 
-Prebuilt binaries for macOS, Linux and Windows (amd64 and arm64) are attached
-to each [GitHub release](https://github.com/Crank-Git/dnscalc/releases):
+Prebuilt binaries for macOS, Linux, and Windows (amd64 and arm64) are attached to each
+[GitHub release](https://github.com/Crank-Git/dnscalc/releases):
 
 ```
 $ curl -LO https://github.com/Crank-Git/dnscalc/releases/latest/download/dnscalc_linux_amd64.tar.gz
 $ tar xzf dnscalc_linux_amd64.tar.gz
-$ ./dnscalc
 ```
 
-Each release also has a `dnscalc_<version>_checksums.txt` with SHA-256 sums
-of the archives.
+Each release also has a `dnscalc_<version>_checksums.txt` with SHA-256 sums of the
+archives.
 
-## Build & run
-
-Requires Go 1.26.5 or newer.
+From source:
 
 ```
 $ go build -o dnscalc .
-$ ./dnscalc            # serves 127.0.0.1:8053 under zone calc.test.
 ```
 
-Flags:
+## Quick start
 
-| flag    | default         | meaning                                   |
-|---------|-----------------|-------------------------------------------|
-| `-listen` | `127.0.0.1:8053` | address to serve on (`host:port`)        |
-| `-zone`   | `calc.test.`    | zone suffix expressions hang under (any case, trailing dot optional) |
+Start the server. With no flags it listens on `127.0.0.1:8053`, UDP and TCP, under the
+zone `calc.test.`:
 
-Serves both UDP and TCP. Every query logs one line:
+```
+$ ./dnscalc
+```
+
+Then ask it something from another terminal:
+
+```
+$ dig @127.0.0.1 -p 8053 +short TXT '2+3*4.calc.test'
+"14"
+$ dig @127.0.0.1 -p 8053 +short TXT '1/0.calc.test'
+"error: division by zero"
+```
+
+An invalid expression still answers `NOERROR`, with the reason in the TXT record. Every
+query logs one line on the server:
 
 ```
 2026/01/01 12:00:00 qname=2+3*4.calc.test. qtype=TXT rcode=NOERROR result=14
 ```
 
-## How names map to expressions
+## Usage
 
-The expression is every label before the zone suffix, joined with `.`. That
-puts decimals back together: labels `1` and `5*2` become `1.5*2`.
+| Flag | Default | Meaning |
+|---|---|---|
+| `-listen` | `127.0.0.1:8053` | Address to serve on (`host:port`). |
+| `-zone` | `calc.test.` | Zone suffix the expressions hang under. Any case, trailing dot optional. |
 
-```
-2.plus.3.calc.test   ->   2.plus.3
-1.5*2.calc.test      ->   1.5*2
-```
+The expression is every label before the zone, joined with `.`. A `.` between two digits
+is a decimal point, and a `.` between two words is a separator, so `1.5*2.calc.test` is
+`1.5*2` and `2.plus.3.calc.test` is `2.plus.3`.
 
-The `.` is a separator only when it sits between two *words*; between two
-digits it is a decimal point. This rule is documented and tested in
-`evaluator.go`.
-
-Parentheses and spaces work directly in names; DNS tools escape them on the
-way (`\(`, `\ `) and the server unescapes before evaluating:
+Parentheses and spaces work directly in names. `dig` escapes them on the way out and the
+server unescapes them before evaluating:
 
 ```
 $ dig @127.0.0.1 -p 8053 +short TXT '(2+3)*4.calc.test'
@@ -72,181 +110,48 @@ $ dig @127.0.0.1 -p 8053 +short TXT '2 tet 3.calc.test'
 "16"
 ```
 
-A single label is at most 63 bytes, so split long expressions with `.` at a
-word boundary (`2^100.plus.3^50`).
+A few things to know:
 
-`dig` reads an argument starting with `-` as an option, so pass such a name
-with `-q`, or start it with the `minus` alias:
+- A label is at most 63 bytes, so split long expressions with `.` at a word boundary
+  (`2^100.plus.3^50`).
+- `dig` reads an argument that starts with `-` as an option. Pass that name with `-q`, or
+  start it with the `minus` alias: `minus.2^2.calc.test` answers `"-4"`.
+- Word aliases (`plus`, `minus`, `times`, `over`, `pow`, `lp`, `rp`) and the zone match in
+  any case, so resolvers that randomize case with 0x20 still work.
 
-```
-$ dig @127.0.0.1 -p 8053 +short -q '-2^2.calc.test' TXT
-"-4"
-$ dig @127.0.0.1 -p 8053 +short TXT 'minus.2^2.calc.test'
-"-4"
-```
+## Documentation
 
-## Operators
+| Page | What's there |
+|---|---|
+| [Reference](docs/reference.md) | Operators and precedence, word aliases, limits, output formatting, and the answer for every kind of query. |
+| [DECISIONS.md](DECISIONS.md) | The rules the evaluator and the server follow, and why. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | The CI checks, the project layout, and how releases are cut. |
 
-Hand-written recursive-descent parser over `*big.Float` at 1024-bit precision
-(no eval, no shelling out, no expression library):
-
-```
-+  -  *  /  ^  tet  ( )
-```
-
-- Unary minus is supported.
-- Non-integer powers are computed as `e^(exp·ln base)` at full precision
-  (`2^0.5` is √2 to 300 digits, `(10^400)^0.5` is exactly 10^200). A
-  negative base with a non-integer exponent is an error.
-- `^` is right-associative and binds **tighter** than unary minus, so
-  `-2^2 == -4` (i.e. `-(2^2)`) and `2^3^2 == 512` (i.e. `2^(3^2)`).
-- `tet` (tetration, `a tet b` = a↑↑b) binds **tighter** than `^`, so
-  `2 tet 3 ^ 2 == 256` (i.e. `(2 tet 3)^2`) and `2 ^ 3 tet 2 == 134217728`
-  (i.e. `2^(3 tet 2)`). The height must be a non-negative integer. Towers
-  that settle return for any height: `1 tet (10^300)` is `1`,
-  `(2^0.5) tet (10^300)` is `2`, `0.5 tet (10^300)` is `0.641185744…`,
-  and `0 tet n` alternates `1, 0`. A tower is limited to 10000 steps; see
-  `DECISIONS.md` for the full rules.
-- Precedence, low to high: `+ -`, then `* /`, then unary `-`, then `^`, then
-  `tet`, then parentheses/atoms.
-
-## Word aliases
-
-Case-insensitive, hostname-safe aliases. Resolvers may randomize case with
-`0x20`, so both the aliases and the zone match in any case
-(`2.PlUs.3.CaLc.TeSt` works, and `-zone` may be given in any case); the
-answer echoes the name in the case it was asked.
-
-| alias   | operator |
-|---------|----------|
-| `plus`  | `+`      |
-| `minus` | `-`      |
-| `times` | `*`      |
-| `over`  | `/`      |
-| `pow`   | `^`      |
-| `tet`   | `tet`    |
-| `lp`    | `(`      |
-| `rp`    | `)`      |
+## Development
 
 ```
-$ dig @127.0.0.1 -p 8053 +short TXT '2.plus.3.calc.test'
-"5"
-```
-
-## Limits
-
-- Name length is bounded by DNS itself (255 bytes).
-- At most **64 tokens** per expression.
-- Parenthesis depth at most **32**.
-- **Magnitude range.** Every value, intermediate or final, must lie within
-  2^±1048576 (about 315,000 digits either side of the point); outside that
-  the answer is `error: result too large` / `error: result too small`. The
-  check runs as soon as an operation produces a value, and powers are
-  estimated before they are computed, so `2^2^2^30` or `0*2^2^31` is
-  rejected in microseconds instead of being worked out. Intermediates may
-  exceed the output cap: `2^1000000/2^999990` is `1024`. Bases `0` and `±1`
-  are answered directly for any exponent (`1^(10^300)` is `1`).
-- A negative base with a non-integer exponent (`(0-2)^0.5`) has no real
-  result and returns `error: result is not a real number`; `0^-1` is a
-  division by zero.
-- **Tetration** is limited to 10000 power steps (about a quarter second);
-  see `DECISIONS.md`.
-- **Output cap.** The result string is capped at **60000 characters**
-  (`maxResultDigits`); a longer one returns `error: result too large` rather
-  than overflowing the packet. This keeps the whole DNS message under the
-  65535-byte limit, the 16-bit length field on both the UDP datagram and the
-  TCP frame.
-- **Long answers.** A TXT character-string holds at most 255 bytes, so a
-  longer result is split into consecutive strings of one TXT record
-  (`dig +short` prints them as `"…" "…"`; join them to get the number). Over
-  UDP the reply is sized to the client's buffer, 512 bytes or its EDNS0
-  size; an answer that does not fit comes back empty with TC set and clients
-  such as `dig` retry over TCP automatically. A 60000-digit answer with a
-  200-byte query name is about 60.5 KB over TCP.
-- **Precision ceiling.** The core is a single `*big.Float` at 1024-bit
-  precision, so results are exact only while the true value needs ≤ 1024
-  significant bits (~309 decimal digits for a general integer). Larger
-  integers are rounded to 1024-bit precision and still printed in full — the
-  leading ~309 digits are right and the rest are not. Powers of two stay
-  exact at any magnitude (their mantissa is a single bit), so `2^199313`
-  (60000 digits) is exact but `2^199316` is rejected only by the output cap.
-
-## Output formatting
-
-Integral results print with no decimal point (`14`, not `14.000000`);
-everything else prints **300 significant digits** with trailing zeros
-trimmed (`%g`, precision 300). The 1024-bit mantissa holds ~308 digits, so
-the last few, where rounding noise lives, are dropped: `2^0.5*2^0.5` is `2`,
-`1/3*3` is `1`, `0.1+0.2` is `0.3`. Numbers smaller than 2^-1100 print in
-scientific notation via a scaled conversion (`2^-200000` →
-`1.0019988054061873...e-60206`), so formatting cost does not grow with how
-small the number is.
-
-## Response behavior
-
-| query                                   | rcode     | answer                                   |
-|-----------------------------------------|-----------|------------------------------------------|
-| TXT, valid expression under the zone    | NOERROR   | TXT `<result>`, TTL 3600                 |
-| TXT, invalid expression under the zone  | NOERROR   | TXT `error: <reason>`, TTL 60            |
-| other qtype under the zone              | NOERROR   | empty answer (NODATA), zone SOA in authority |
-| SOA at the zone apex                    | NOERROR   | the zone SOA                             |
-| name outside the zone                   | REFUSED   | —                                        |
-| internal error (handler panic)          | SERVFAIL  | —                                        |
-
-Responses set the AA flag. A UDP reply too large for the client's buffer
-has TC set and no answer; retry over TCP. A query with EDNS0 gets an OPT
-record back.
-
-## Testing
-
-```
-$ go test ./...            # unit, in-process DNS and e2e tests
+$ go test ./...            # unit, in-process DNS, and e2e tests
 $ go test -short ./...     # skip the e2e tests (no binary build, no dig)
-$ go test -race ./...      # with the race detector (what CI runs)
+$ go test -race ./...      # with the race detector, as CI runs it
 $ go test -run='^$' -fuzz=FuzzEvaluate -fuzztime=30s   # fuzz
 ```
 
-The evaluator has table-driven tests (precedence, unary minus, right-
-associative `^`, tetration, decimals, aliases, every error path) and a fuzz
-target (`FuzzEvaluate`) that must never panic.
+`e2e_test.go` builds the binary and queries it over real DNS with `dig`. It skips if
+`dig` isn't installed, unless `DNSCALC_REQUIRE_DIG=1` is set, which is how CI runs it.
+`bigmath_test.go` and `tetration_test.go` check fractional powers and towers against
+references computed separately with Python's `decimal` module.
 
-`limits_test.go` pins the two ceilings that bound how large a number we can
-output: the 60000-character output cap (`TestOutputCapBoundary`) and the
-1024-bit precision limit (`TestPrecisionBitLimit`), plus the value range and
-the cost of formatting. `bigmath_test.go` and `tetration_test.go` check
-fractional powers and towers against references computed independently with
-Python's `decimal` module. `e2e_test.go` builds the binary and queries it
-over real DNS, including with `dig` (skipped if `dig` is not installed; CI
-installs it and sets `DNSCALC_REQUIRE_DIG=1` so it cannot skip there).
+## License
 
-## Project layout
+MIT. See [LICENSE](LICENSE).
 
-```
-evaluator.go   tokenizer, limits, result formatting
-parser.go      recursive-descent parser, powers, tetration
-bigmath.go     ln / exp over *big.Float for non-integer powers
-main.go        DNS server: zone matching, answers, reply sizing, flags
-DECISIONS.md   the rules the code follows, and why
-evaluator_test.go   evaluator table tests + fuzz target
-limits_test.go      output cap, precision ceiling, magnitude range, formatting cost
-bigmath_test.go     ln / exp / fractional powers against high-precision references
-tetration_test.go   towers: settling, 2-cycles, limits
-main_test.go        in-process DNS tests (UDP and TCP)
-e2e_test.go         built binary over real DNS, including dig
-.goreleaser.yml     release builds
-```
+---
 
-Milestones ship as separate PRs: M1 evaluator, M2 server, M3 README +
-CI, M4a tetration operator, M4c big.Float precision and output cap.
-v0.2.0 hardens all of it: no crashing or unbounded queries, full-precision
-fractional powers, towers that settle, long answers delivered, and
-case-insensitive zones (#7–#26).
-
-## Releasing
-
-Tag `main` and run goreleaser with a GitHub token:
-
-```
-$ git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
-$ GITHUB_TOKEN=$(gh auth token) goreleaser release --clean
-```
+<sub>Part of <a href="https://github.com/Crank-Git#things-over-port-53"><b>Things over port 53</b></a>,
+my experiments in what else DNS can carry.
+Siblings: <a href="https://github.com/Crank-Git/epochalypse">epochalypse</a> ·
+<a href="https://github.com/Crank-Git/mcport53">mcport53</a> ·
+<a href="https://github.com/Crank-Git/wingman">wingman</a> ·
+<a href="https://github.com/Crank-Git/cachemoney">cachemoney</a> ·
+<a href="https://github.com/Crank-Git/llamaoverdns">llamaoverdns</a> ·
+Built by <a href="https://github.com/Crank-Git">Crank</a></sub>
